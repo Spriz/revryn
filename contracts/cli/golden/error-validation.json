@@ -1,0 +1,20 @@
+{
+  "error": {
+    "kind": "validation",
+    "code": "invalid_input",
+    "message": "validation problem (invalid_input): quantity must be positive",
+    "fields": [
+      {
+        "path": [
+          "input",
+          "quantity"
+        ],
+        "code": "must_be_positive",
+        "message": "must be positive"
+      }
+    ],
+    "exitCode": 5
+  },
+  "correlationId": "corr-fixed",
+  "schema": "billingctl.v1"
+}

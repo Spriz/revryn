@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Billing Core backup (SPEC §24.8, INV-019).
+#
+# Produces a portable archive containing a logical PostgreSQL dump, a
+# manifest with per-file SHA-256 checksums, and application metadata.
+# Usage: billing-core backup --destination /backups [--database-url URL]
+set -euo pipefail
+
+DESTINATION=""
+DATABASE_URL="${DATABASE_URL:-}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --destination) DESTINATION="$2"; shift 2 ;;
+    --database-url) DATABASE_URL="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 64 ;;
+  esac
+done
+
+[ -n "$DESTINATION" ] || { echo "--destination is required" >&2; exit 64; }
+[ -n "$DATABASE_URL" ] || { echo "DATABASE_URL is required" >&2; exit 64; }
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+WORKDIR="$(mktemp -d)"
+NAME="billing-core-backup-${STAMP}"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+mkdir -p "$WORKDIR/$NAME"
+
+echo "[backup] dumping database" >&2
+pg_dump --format=custom --no-owner --dbname="$DATABASE_URL" \
+  --file="$WORKDIR/$NAME/database.dump"
+
+APP_VERSION="$(cat /app/releases/*/vm.args 2>/dev/null | head -1 || echo unknown)"
+
+cat > "$WORKDIR/$NAME/metadata.json" << EOF
+{
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "schema": "billing",
+  "format": "pg_dump_custom",
+  "app": "billing_core",
+  "backup_tool_version": "1"
+}
+EOF
+
+echo "[backup] writing manifest" >&2
+(
+  cd "$WORKDIR/$NAME"
+  sha256sum database.dump metadata.json > MANIFEST.sha256
+)
+
+mkdir -p "$DESTINATION"
+tar -C "$WORKDIR" -czf "$DESTINATION/$NAME.tar.gz" "$NAME"
+sha256sum "$DESTINATION/$NAME.tar.gz" > "$DESTINATION/$NAME.tar.gz.sha256"
+
+echo "[backup] created $DESTINATION/$NAME.tar.gz" >&2
+echo "$DESTINATION/$NAME.tar.gz"

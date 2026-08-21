@@ -1,0 +1,5 @@
+ID    EXTERNAL ID  LEGAL NAME            STATUS  VERSION
+cu-1  crm-1001     Nordisk Regnskab ApS  active  2
+cu-2  crm-1002     -                     active  1
+
+more results available; continue with --after c2

@@ -1,0 +1,15 @@
+{
+  "name": "billing-core-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright end-to-end suites for Billing Core (SPEC 23.6)",
+  "scripts": {
+    "test": "playwright test",
+    "test:smoke": "playwright test smoke",
+    "test:features": "playwright test features",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

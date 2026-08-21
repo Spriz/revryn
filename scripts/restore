@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Billing Core restore (SPEC §24.8, INV-019).
+#
+# Restores a backup archive into a target database after checksum and
+# compatibility validation. Never contacts an ERP; run the application in
+# RESTORE_VALIDATION_MODE=true afterwards until reconciliation completes.
+# Usage: billing-core restore --source /backups/x.tar.gz [--database-url URL]
+#        [--dry-run] [--force]
+set -euo pipefail
+
+SOURCE=""
+DATABASE_URL="${DATABASE_URL:-}"
+DRY_RUN=false
+FORCE=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source) SOURCE="$2"; shift 2 ;;
+    --database-url) DATABASE_URL="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --force) FORCE=true; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 64 ;;
+  esac
+done
+
+[ -n "$SOURCE" ] || { echo "--source is required" >&2; exit 64; }
+[ -f "$SOURCE" ] || { echo "backup archive not found: $SOURCE" >&2; exit 66; }
+
+if [ -f "$SOURCE.sha256" ]; then
+  echo "[restore] verifying archive checksum" >&2
+  (cd "$(dirname "$SOURCE")" && sha256sum -c "$(basename "$SOURCE").sha256" >/dev/null)
+else
+  echo "[restore] WARNING: no archive checksum file found" >&2
+fi
+
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+tar -C "$WORKDIR" -xzf "$SOURCE"
+NAME="$(ls "$WORKDIR")"
+
+echo "[restore] verifying content checksums" >&2
+(cd "$WORKDIR/$NAME" && sha256sum -c MANIFEST.sha256 >/dev/null)
+
+echo "[restore] backup metadata:" >&2
+cat "$WORKDIR/$NAME/metadata.json" >&2
+
+grep -q '"format": "pg_dump_custom"' "$WORKDIR/$NAME/metadata.json" || {
+  echo "[restore] FATAL: unsupported backup format" >&2
+  exit 65
+}
+
+if [ "$DRY_RUN" = true ]; then
+  echo "[restore] dry run complete; no changes made" >&2
+  exit 0
+fi
+
+[ -n "$DATABASE_URL" ] || { echo "DATABASE_URL is required" >&2; exit 64; }
+
+# Target-volume safety: refuse to restore over a non-empty billing schema
+# unless forced.
+EXISTING=$(psql "$DATABASE_URL" -tAc \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='billing'" 2>/dev/null || echo 0)
+if [ "${EXISTING:-0}" -gt 0 ] && [ "$FORCE" != true ]; then
+  echo "[restore] FATAL: target already contains $EXISTING billing tables; use --force" >&2
+  exit 65
+fi
+
+echo "[restore] restoring database" >&2
+pg_restore --no-owner --clean --if-exists --dbname="$DATABASE_URL" \
+  "$WORKDIR/$NAME/database.dump"
+
+echo "[restore] complete. Start the application with RESTORE_VALIDATION_MODE=true" >&2

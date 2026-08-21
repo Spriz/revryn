@@ -1,0 +1,1152 @@
+schema {
+  mutation: RootMutationType
+  query: RootQueryType
+}
+
+type RootQueryType {
+  "Schema\/contract version marker for compatibility checks."
+  apiVersion: String!
+
+  "The authenticated principal and its memberships."
+  viewer: Viewer
+
+  "Organizations the caller actively belongs to."
+  organizations: [Organization!]!
+
+  "A single organization the caller belongs to."
+  organization(organizationId: ID!): Organization
+
+  "A team the caller is a member of."
+  team(teamId: ID!): Team
+
+  "Active teams of an organization the caller belongs to."
+  teams(organizationId: ID!): [Team!]!
+
+  "A team customer by ID."
+  customer(teamId: ID!, id: ID!): Customer
+
+  "Team customers as a bounded cursor connection (SPEC §14.6)."
+  customers(teamId: ID!, first: Int, after: String): CustomerConnection
+
+  "A team contract by ID."
+  contract(teamId: ID!, id: ID!): Contract
+
+  "A subscription by ID."
+  subscription(teamId: ID!, id: ID!): Subscription
+
+  "Team subscriptions as a bounded cursor connection."
+  subscriptions(teamId: ID!, first: Int, after: String): SubscriptionConnection
+
+  "A catalog product by ID."
+  product(teamId: ID!, id: ID!): Product
+
+  "Team products as a bounded cursor connection."
+  products(teamId: ID!, first: Int, after: String): ProductConnection
+
+  "A plan by ID."
+  plan(teamId: ID!, id: ID!): Plan
+
+  "A plan version by ID (draft or published)."
+  planVersion(teamId: ID!, id: ID!): PlanVersion
+
+  "A discount by ID."
+  discount(teamId: ID!, id: ID!): Discount
+
+  "An immutable invoice intent with lines and lifecycle state."
+  invoiceIntent(teamId: ID!, id: ID!): InvoiceIntent
+
+  "Deterministic invoice preview for a subscription (BC-US-068)."
+  invoicePreview(teamId: ID!, subscriptionId: ID!, asOf: Date!): InvoicePreview
+
+  "Usage aggregation preview for a metric over a period (BC-US-053)."
+  usagePreview(
+    teamId: ID!, subscriptionId: ID!, metricCode: String!, periodStart: Date!, periodEndExclusive: Date!, cutoff: DateTime, aggregation: String
+  ): UsageAggregate
+
+  "A billing run by ID."
+  billingRun(teamId: ID!, id: ID!): BillingRun
+
+  "The team's ERP connection."
+  erpConnection(teamId: ID!): ErpConnection
+
+  "A durable operation by ID (team-scoped)."
+  operation(teamId: ID!, id: ID!): Operation
+}
+
+type RootMutationType {
+  "Ingests one usage event idempotently by external event ID (BC-US-050)."
+  ingestUsageEvent(input: IngestUsageEventInput!): IngestUsageEventResult!
+
+  "Ingests usage events in a batch with per-event independence (BC-US-051)."
+  ingestUsageBatch(input: IngestUsageBatchInput!): IngestUsageBatchResult!
+
+  "Voids a measurement, optionally submitting a replacement (BC-US-052)."
+  voidUsageEvent(input: VoidUsageEventInput!): VoidUsageEventResult!
+
+  "Creates an organization with its first team (INV-033)."
+  createOrganization(input: CreateOrganizationInput!): CreateOrganizationResult!
+
+  "Creates an additional team (organization admins)."
+  createTeam(input: CreateTeamInput!): CreateTeamResult!
+
+  "Creates or updates a customer as an immutable version snapshot (BC-US-030)."
+  upsertCustomer(input: UpsertCustomerInput!): UpsertCustomerResult!
+
+  "Maps a customer to an ERP customer number (BC-US-031)."
+  mapCustomerToErp(input: MapCustomerToErpInput!): MapCustomerToErpResult!
+
+  "Creates a product with its version 1 snapshot (BC-US-010)."
+  createProduct(input: CreateProductInput!): CreateProductResult!
+
+  "Creates a plan (stable code owner, BC-US-013)."
+  createPlan(input: CreatePlanInput!): CreatePlanResult!
+
+  "Creates a draft plan version with its components in one command."
+  createPlanVersion(input: CreatePlanVersionInput!): CreatePlanVersionResult!
+
+  "Publishes a draft plan version, making it immutable (BC-US-014)."
+  publishPlanVersion(input: PublishPlanVersionInput!): PublishPlanVersionResult!
+
+  "Creates a contract with its immutable version 1 (BC-US-033)."
+  createContract(input: CreateContractInput!): CreateContractResult!
+
+  "Starts a subscription (BC-US-034\/035, SPEC §14.9)."
+  createSubscription(input: CreateSubscriptionInput!): CreateSubscriptionResult!
+
+  "Changes a subscription's quantity by appending a version (BC-US-036)."
+  changeSubscription(input: ChangeSubscriptionInput!): ChangeSubscriptionResult!
+
+  "Cancels a subscription immediately or at period end (BC-US-038)."
+  cancelSubscription(input: CancelSubscriptionInput!): CancelSubscriptionResult!
+
+  "Creates an idempotent one-time charge instance (BC-US-041)."
+  createChargeInstance(input: CreateChargeInstanceInput!): CreateChargeInstanceResult!
+
+  "Opens (or returns) a billing run by stable run key (SPEC §18.1)."
+  createBillingRun(input: CreateBillingRunInput!): CreateBillingRunResult!
+
+  "Freezes a subscription's preview into immutable invoice intent (BC-US-069)."
+  freezeInvoiceIntent(input: FreezeInvoiceIntentInput!): FreezeInvoiceIntentResult!
+
+  "Replaces a frozen, unsynchronized intent in its chain (BC-US-100)."
+  supersedeInvoiceIntent(input: SupersedeInvoiceIntentInput!): SupersedeInvoiceIntentResult!
+
+  "Runs the ERP adapter preflight and records capabilities (BC-US-004)."
+  validateErpConnection(input: ValidateErpConnectionInput!): ValidateErpConnectionResult!
+
+  "Enqueues ERP draft synchronization; follow the returned operation (§14.11)."
+  synchronizeInvoice(input: SynchronizeInvoiceInput!): SynchronizeInvoiceResult!
+
+  "Approves a reconciled ERP draft for booking (BC-US-084)."
+  approveInvoice(input: ApproveInvoiceInput!): ApproveInvoiceResult!
+
+  "Enqueues booking of an approved draft (BC-US-085)."
+  bookInvoice(input: BookInvoiceInput!): BookInvoiceResult!
+
+  "Manually retries a failed durable operation (finance role, §11.3)."
+  retryOperation(input: RetryOperationInput!): RetryOperationResult!
+}
+
+"Result of one ingested usage event."
+type UsageIngestOutcome {
+  "accepted | duplicate | quarantined"
+  status: String!
+
+  usageEventId: ID
+
+  quarantineReason: String
+}
+
+"Aggregation preview for a metric over a period at a fixed cutoff (BC-US-053)."
+type UsageAggregate {
+  metricCode: String!
+  aggregation: String!
+  quantity: Decimal!
+  eventCount: Int!
+  excludedLate: Int!
+  firstOccurredAt: DateTime
+  lastOccurredAt: DateTime
+  cutoff: DateTime!
+}
+
+input IngestUsageEventInput {
+  teamId: ID!
+  externalEventId: String!
+  subscriptionId: ID
+  subscriptionExternalId: String
+  metricCode: String!
+  occurredAt: DateTime!
+  value: Decimal!
+  properties: Json
+  clientMutationId: String!
+}
+
+type IngestUsageEventSuccess {
+  outcome: UsageIngestOutcome!
+  duplicate: Boolean!
+  clientMutationId: String!
+}
+
+"The external event ID was already used with a different payload (BC-US-050)."
+type UsageEventConflict {
+  code: String!
+  message: String!
+  clientMutationId: String
+}
+
+union IngestUsageEventResult = IngestUsageEventSuccess | UsageEventConflict | ValidationProblem | AuthorizationProblem
+
+input UsageBatchEventInput {
+  externalEventId: String!
+  subscriptionId: ID
+  subscriptionExternalId: String
+  metricCode: String!
+  occurredAt: DateTime!
+  value: Decimal!
+  properties: Json
+}
+
+input IngestUsageBatchInput {
+  teamId: ID!
+  events: [UsageBatchEventInput!]!
+  clientMutationId: String!
+}
+
+type UsageBatchItemResult {
+  externalEventId: String!
+
+  "accepted | duplicate | rejected | quarantined"
+  status: String!
+
+  detail: String
+}
+
+type IngestUsageBatchSuccess {
+  accepted: Int!
+  duplicate: Int!
+  rejected: Int!
+  quarantined: Int!
+  items: [UsageBatchItemResult!]!
+  clientMutationId: String!
+}
+
+union IngestUsageBatchResult = IngestUsageBatchSuccess | ValidationProblem | AuthorizationProblem
+
+input VoidUsageEventInput {
+  teamId: ID!
+
+  "The measurement to void."
+  externalEventId: String!
+
+  "External ID of the void itself (idempotency)."
+  voidEventId: String!
+
+  "Optional corrected measurement submitted with the void (BC-US-052)."
+  replacement: UsageBatchEventInput
+
+  clientMutationId: String!
+}
+
+type VoidUsageEventSuccess {
+  "voided | already_voided"
+  status: String!
+
+  clientMutationId: String!
+}
+
+union VoidUsageEventResult = VoidUsageEventSuccess | UsageEventConflict | ValidationProblem | AuthorizationProblem
+
+type ErpConnection {
+  id: ID!
+  provider: String!
+  status: String!
+  externalAgreementId: String
+  capabilitiesHash: String
+  lastValidatedAt: DateTime
+}
+
+input ValidateErpConnectionInput {
+  teamId: ID!
+  erpConnectionId: ID!
+  clientMutationId: String!
+}
+
+type ValidateErpConnectionSuccess {
+  erpConnection: ErpConnection!
+  clientMutationId: String!
+}
+
+union ValidateErpConnectionResult = ValidateErpConnectionSuccess | ValidationProblem | AuthorizationProblem
+
+input SynchronizeInvoiceInput {
+  teamId: ID!
+  invoiceIntentId: ID!
+  idempotencyKey: String!
+  clientMutationId: String!
+}
+
+type SynchronizeInvoiceAccepted {
+  "Durable operation to follow; work continues asynchronously."
+  operation: Operation!
+
+  clientMutationId: String!
+}
+
+union SynchronizeInvoiceResult = SynchronizeInvoiceAccepted | MappingProblem | ValidationProblem | AuthorizationProblem | IdempotencyConflict
+
+input ApproveInvoiceInput {
+  teamId: ID!
+  invoiceIntentId: ID!
+  reason: String
+  clientMutationId: String!
+}
+
+type ApproveInvoiceSuccess {
+  invoiceIntent: InvoiceIntent!
+  clientMutationId: String!
+}
+
+union ApproveInvoiceResult = ApproveInvoiceSuccess | ValidationProblem | AuthorizationProblem
+
+input BookInvoiceInput {
+  teamId: ID!
+  invoiceIntentId: ID!
+  idempotencyKey: String!
+  clientMutationId: String!
+}
+
+type BookInvoiceAccepted {
+  "Durable booking operation to follow."
+  operation: Operation!
+
+  clientMutationId: String!
+}
+
+union BookInvoiceResult = BookInvoiceAccepted | ValidationProblem | AuthorizationProblem | IdempotencyConflict
+
+type BillingRun {
+  id: ID!
+  runKey: String!
+  status: String!
+  invoiceDate: Date!
+  usageCutoff: DateTime!
+  engineVersion: String!
+  startedAt: DateTime
+  closedAt: DateTime
+}
+
+type InvoiceLine {
+  id: ID!
+  lineKey: String!
+  description: String!
+  quantity: Decimal!
+  amountMinor: MoneyMinorUnits!
+  currency: String!
+  recognitionMode: String!
+  serviceStart: Date
+  serviceEndExclusive: Date
+  ordinal: Int!
+  productId: ID!
+  productVersion: Int!
+}
+
+"Immutable frozen invoice intent plus its mutable lifecycle state (§11.2)."
+type InvoiceIntent {
+  id: ID!
+
+  "Current §11.2 lifecycle state (frozen, sync_pending, erp_draft, ...)."
+  state: String!
+
+  customerId: ID!
+
+  customerVersion: Int!
+
+  contractId: ID
+
+  billingRunId: ID
+
+  currency: String!
+
+  invoiceDate: Date!
+
+  intentVersion: Int!
+
+  supersedesInvoiceIntentId: ID
+
+  documentKind: String!
+
+  contentHash: String!
+
+  netAmountMinor: MoneyMinorUnits!
+
+  frozenAt: DateTime
+
+  lines: [InvoiceLine!]!
+}
+
+"Deterministic, side-effect-free invoice preview (BC-US-068)."
+type InvoicePreview {
+  subscriptionId: ID!
+
+  customerId: ID!
+
+  contractId: ID!
+
+  currency: String!
+
+  invoiceDate: Date!
+
+  periodStart: Date!
+
+  periodEndExclusive: Date!
+
+  netAmountMinor: MoneyMinorUnits!
+
+  "Stable for unchanged inputs; freezing verifies against this."
+  fingerprint: String!
+
+  "Stable-coded conditions preventing freeze; empty means freezable."
+  blockers: [String!]!
+
+  lines: [PreviewLine!]!
+}
+
+type PreviewLine {
+  lineKey: String!
+  description: String!
+  quantity: Decimal!
+  amountMinor: MoneyMinorUnits!
+  recognitionMode: String!
+  serviceStart: Date
+  serviceEndExclusive: Date
+  ordinal: Int!
+  productId: ID!
+}
+
+input CreateBillingRunInput {
+  teamId: ID!
+
+  "Stable run key; reopening the same key returns the existing run."
+  runKey: String!
+
+  invoiceDate: Date!
+
+  usageCutoff: DateTime!
+
+  idempotencyKey: String!
+
+  clientMutationId: String!
+}
+
+type CreateBillingRunSuccess {
+  billingRun: BillingRun!
+  clientMutationId: String!
+}
+
+union CreateBillingRunResult = CreateBillingRunSuccess | ValidationProblem | AuthorizationProblem | IdempotencyConflict
+
+input FreezeInvoiceIntentInput {
+  teamId: ID!
+
+  subscriptionId: ID!
+
+  "The preview date; the billing period containing it is frozen."
+  asOf: Date!
+
+  billingRunId: ID
+
+  idempotencyKey: String!
+
+  clientMutationId: String!
+}
+
+type FreezeInvoiceIntentSuccess {
+  invoiceIntent: InvoiceIntent!
+  clientMutationId: String!
+}
+
+union FreezeInvoiceIntentResult = FreezeInvoiceIntentSuccess | ValidationProblem | MappingProblem | AuthorizationProblem | IdempotencyConflict
+
+input SupersedeInvoiceIntentInput {
+  teamId: ID!
+
+  invoiceIntentId: ID!
+
+  subscriptionId: ID!
+
+  "Preview date for the replacement intent's lines."
+  asOf: Date!
+
+  reason: String
+
+  clientMutationId: String!
+}
+
+type SupersedeInvoiceIntentSuccess {
+  "The replacement intent (intentVersion incremented, same chain)."
+  invoiceIntent: InvoiceIntent!
+
+  clientMutationId: String!
+}
+
+union SupersedeInvoiceIntentResult = SupersedeInvoiceIntentSuccess | ValidationProblem | MappingProblem | AuthorizationProblem
+
+type Product {
+  id: ID!
+  code: String!
+  name: String!
+  description: String
+  status: String!
+  recognitionMode: String
+  currentVersion: Int!
+}
+
+type ProductEdge {
+  cursor: String!
+  node: Product!
+}
+
+type ProductConnection {
+  edges: [ProductEdge!]!
+  pageInfo: PageInfo!
+}
+
+type Plan {
+  id: ID!
+
+  code: String!
+
+  name: String!
+
+  status: String!
+
+  "Highest published version; 0 while no version is published."
+  currentVersion: Int!
+}
+
+type PlanVersion {
+  id: ID!
+  planId: ID!
+  version: Int!
+  status: String!
+  currency: String!
+  intervalUnit: String!
+  intervalCount: Int!
+  billingTiming: String!
+  effectiveFrom: Date
+  contentHash: String
+  publishedAt: DateTime
+  priceComponents: [PriceComponent!]!
+}
+
+type PriceComponent {
+  id: ID!
+  code: String!
+  productId: ID!
+  productVersion: Int
+  pricingModel: String!
+  recognitionMode: String!
+  prorationPolicy: String!
+  ordinal: Int!
+}
+
+type Discount {
+  id: ID!
+  code: String!
+  status: String!
+  currentVersion: Int!
+}
+
+input CreateProductInput {
+  teamId: ID!
+  code: String!
+  name: String!
+  description: String
+  recognitionMode: RecognitionMode
+  servicePeriodSource: String
+  clientMutationId: String!
+}
+
+type CreateProductSuccess {
+  product: Product!
+  clientMutationId: String!
+}
+
+union CreateProductResult = CreateProductSuccess | ValidationProblem | AuthorizationProblem
+
+input CreatePlanInput {
+  teamId: ID!
+  code: String!
+  name: String!
+  clientMutationId: String!
+}
+
+type CreatePlanSuccess {
+  plan: Plan!
+  clientMutationId: String!
+}
+
+union CreatePlanResult = CreatePlanSuccess | ValidationProblem | AuthorizationProblem
+
+enum IntervalUnit {
+  MONTH
+  DAY
+}
+
+enum BillingTiming {
+  IN_ADVANCE
+  IN_ARREARS
+}
+
+"Versioned pricing definition; exactly one model group is set (SPEC §9.6)."
+input PricingDefinitionInput {
+  fixedRecurring: FixedRecurringPricingInput
+  oneTime: OneTimePricingInput
+  standardMetered: StandardMeteredPricingInput
+  volumeTier: TieredPricingInput
+  graduatedTier: TieredPricingInput
+  package: PackagePricingInput
+  minimumCommit: MinimumCommitPricingInput
+}
+
+input FixedRecurringPricingInput {
+  "Unit price per interval in major currency units."
+  unitPrice: Decimal!
+}
+
+input OneTimePricingInput {
+  unitPrice: Decimal!
+}
+
+input StandardMeteredPricingInput {
+  "Per-unit rate in major currency units."
+  unitRate: Decimal!
+}
+
+"Contiguous tier: half-open [from, to); the final tier omits `to` (SPEC §10.3\/10.4)."
+input PricingTierInput {
+  from: Decimal!
+  to: Decimal
+  unitRate: Decimal!
+  flatFeeMinor: MoneyMinorUnits
+}
+
+input TieredPricingInput {
+  tiers: [PricingTierInput!]!
+}
+
+input PackagePricingInput {
+  packageSize: Decimal!
+
+  "Price per whole package in major currency units."
+  packagePrice: Decimal!
+}
+
+"Minimum commit wrapping an inner usage model (SPEC §10.6)."
+input MinimumCommitPricingInput {
+  minimumAmountMinor: MoneyMinorUnits!
+  inner: PricingDefinitionInput!
+}
+
+input PriceComponentInput {
+  code: String!
+
+  productId: ID!
+
+  pricingDefinition: PricingDefinitionInput!
+
+  prorationPolicy: String
+
+  ordinal: Int
+
+  "Required for metered models: the usage metric this component rates."
+  metricCode: String
+
+  "sum | count | max | unique_count"
+  aggregation: String
+}
+
+input CreatePlanVersionInput {
+  teamId: ID!
+  planId: ID!
+  currency: String!
+  intervalUnit: IntervalUnit!
+  intervalCount: Int!
+  billingTiming: BillingTiming!
+  effectiveFrom: Date
+  components: [PriceComponentInput!]!
+  clientMutationId: String!
+}
+
+type CreatePlanVersionSuccess {
+  planVersion: PlanVersion!
+  clientMutationId: String!
+}
+
+union CreatePlanVersionResult = CreatePlanVersionSuccess | ValidationProblem | AuthorizationProblem
+
+input PublishPlanVersionInput {
+  teamId: ID!
+  planVersionId: ID!
+  clientMutationId: String!
+}
+
+type PublishPlanVersionSuccess {
+  planVersion: PlanVersion!
+  clientMutationId: String!
+}
+
+union PublishPlanVersionResult = PublishPlanVersionSuccess | ValidationProblem | AuthorizationProblem
+
+type Customer {
+  id: ID!
+
+  externalId: String!
+
+  status: String!
+
+  currentVersion: Int!
+
+  "Legal name from the current immutable customer version snapshot."
+  legalName: String
+}
+
+type CustomerEdge {
+  cursor: String!
+  node: Customer!
+}
+
+type CustomerConnection {
+  edges: [CustomerEdge!]!
+  pageInfo: PageInfo!
+}
+
+type CustomerErpMapping {
+  id: ID!
+  customerId: ID!
+  erpConnectionId: ID!
+  externalCustomerNumber: String!
+  validationStatus: String!
+}
+
+type Contract {
+  id: ID!
+  customerId: ID!
+  externalReference: String
+  status: String!
+  currency: String!
+  startDate: Date!
+  endDateExclusive: Date
+  currentVersion: Int!
+}
+
+"A contract subscription (SPEC §11.1 lifecycle)."
+type Subscription {
+  id: ID!
+
+  externalId: String!
+
+  contractId: ID!
+
+  "§11.1 lifecycle state."
+  state: String!
+
+  startsOn: Date!
+
+  endDateExclusive: Date
+
+  billingAnchorDay: Int
+
+  timeZone: String!
+
+  "Optimistic-concurrency version of the aggregate (SPEC §14.3)."
+  version: Int!
+
+  currentVersion: Int!
+}
+
+type SubscriptionEdge {
+  cursor: String!
+  node: Subscription!
+}
+
+type SubscriptionConnection {
+  edges: [SubscriptionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ChargeInstance {
+  id: ID!
+  externalId: String!
+  contractId: ID!
+  subscriptionId: ID
+  status: String!
+  eligibleOn: Date!
+  quantity: Decimal
+  amountMinor: MoneyMinorUnits
+  currency: String!
+  recognitionMode: String!
+  serviceStart: Date
+  serviceEndExclusive: Date
+}
+
+input UpsertCustomerInput {
+  teamId: ID!
+
+  externalId: String!
+
+  legalName: String!
+
+  country: String!
+
+  email: String!
+
+  addressLine: String
+
+  zip: String
+
+  city: String
+
+  vatNumber: String
+
+  currencyPreference: String
+
+  "Optimistic concurrency against the customer's currentVersion."
+  expectedVersion: Int
+
+  idempotencyKey: String!
+
+  clientMutationId: String!
+}
+
+type UpsertCustomerSuccess {
+  customer: Customer!
+  clientMutationId: String!
+}
+
+union UpsertCustomerResult = UpsertCustomerSuccess | ValidationProblem | AuthorizationProblem | VersionConflict | IdempotencyConflict
+
+input MapCustomerToErpInput {
+  teamId: ID!
+  customerId: ID!
+  erpConnectionId: ID!
+  externalCustomerNumber: String!
+  clientMutationId: String!
+}
+
+type MapCustomerToErpSuccess {
+  mapping: CustomerErpMapping!
+  clientMutationId: String!
+}
+
+union MapCustomerToErpResult = MapCustomerToErpSuccess | ValidationProblem | AuthorizationProblem
+
+input CreateContractInput {
+  teamId: ID!
+  customerId: ID!
+  externalReference: String
+  currency: String!
+  startDate: Date!
+  endDateExclusive: Date
+  clientMutationId: String!
+}
+
+type CreateContractSuccess {
+  contract: Contract!
+  clientMutationId: String!
+}
+
+union CreateContractResult = CreateContractSuccess | ValidationProblem | AuthorizationProblem
+
+input CreateSubscriptionInput {
+  teamId: ID!
+  contractId: ID!
+  externalId: String!
+  planVersionId: ID!
+  startsOn: Date!
+  endDateExclusive: Date
+  billingAnchorDay: Int
+  quantity: Decimal!
+  idempotencyKey: String!
+  clientMutationId: String!
+}
+
+type CreateSubscriptionSuccess {
+  subscription: Subscription!
+  clientMutationId: String!
+}
+
+union CreateSubscriptionResult = CreateSubscriptionSuccess | ValidationProblem | AuthorizationProblem | VersionConflict | IdempotencyConflict
+
+input ChangeSubscriptionInput {
+  teamId: ID!
+
+  subscriptionId: ID!
+
+  quantity: Decimal!
+
+  "Defaults to today in the subscription's time zone."
+  effectiveDate: Date
+
+  idempotencyKey: String!
+
+  clientMutationId: String!
+}
+
+type ChangeSubscriptionSuccess {
+  subscription: Subscription!
+  clientMutationId: String!
+}
+
+union ChangeSubscriptionResult = ChangeSubscriptionSuccess | ValidationProblem | AuthorizationProblem | IdempotencyConflict
+
+enum CancellationMode {
+  IMMEDIATE
+  END_OF_PERIOD
+}
+
+input CancelSubscriptionInput {
+  teamId: ID!
+
+  subscriptionId: ID!
+
+  mode: CancellationMode!
+
+  effectiveDate: Date
+
+  "Required for END_OF_PERIOD: the period boundary computed by billing."
+  periodEndDate: Date
+
+  reason: String
+
+  idempotencyKey: String!
+
+  clientMutationId: String!
+}
+
+type CancelSubscriptionSuccess {
+  subscription: Subscription!
+  clientMutationId: String!
+}
+
+union CancelSubscriptionResult = CancelSubscriptionSuccess | ValidationProblem | AuthorizationProblem | IdempotencyConflict
+
+enum RecognitionMode {
+  POINT_IN_TIME
+  OVER_TIME
+}
+
+input CreateChargeInstanceInput {
+  teamId: ID!
+
+  contractId: ID!
+
+  subscriptionId: ID
+
+  externalId: String!
+
+  productId: ID!
+
+  productVersion: Int!
+
+  eligibleOn: Date!
+
+  recognitionMode: RecognitionMode!
+
+  "Pricing source A: explicit amount in minor units (quantity fixed at 1)."
+  amountMinor: MoneyMinorUnits
+
+  "Pricing source B: a price component with a positive quantity."
+  priceComponentId: ID
+
+  quantity: Decimal
+
+  currency: String
+
+  serviceStart: Date
+
+  serviceEndExclusive: Date
+
+  idempotencyKey: String!
+
+  clientMutationId: String!
+}
+
+type CreateChargeInstanceSuccess {
+  chargeInstance: ChargeInstance!
+  clientMutationId: String!
+}
+
+union CreateChargeInstanceResult = CreateChargeInstanceSuccess | ValidationProblem | AuthorizationProblem | IdempotencyConflict
+
+type FieldProblem {
+  path: [String!]!
+  code: String!
+  message: String!
+}
+
+type ValidationProblem {
+  code: String!
+  message: String!
+  fields: [FieldProblem!]!
+  clientMutationId: String
+}
+
+"Missing\/invalid ERP mappings or other unmet preconditions (SPEC §14.11)."
+type MappingProblem {
+  code: String!
+  message: String!
+  fields: [FieldProblem!]!
+  clientMutationId: String
+}
+
+type AuthorizationProblem {
+  code: String!
+  message: String!
+  clientMutationId: String
+}
+
+type VersionConflict {
+  expectedVersion: Int
+  actualVersion: Int
+  clientMutationId: String
+}
+
+"The idempotency key was reused with materially different input."
+type IdempotencyConflict {
+  code: String!
+  message: String!
+  clientMutationId: String
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}
+
+"Durable asynchronous operation; clients follow it instead of HTTP 202 semantics."
+type Operation {
+  id: ID!
+  type: String!
+  state: String!
+  attemptCount: Int!
+  errorClass: String
+  safeErrorCode: String
+  safeErrorSummary: String
+  blockedReason: String
+  nextAttemptAt: DateTime
+  correlationId: ID
+  startedAt: DateTime
+  finishedAt: DateTime
+}
+
+"The authenticated principal and its memberships."
+type Viewer {
+  id: ID!
+  status: String!
+  platformAdmin: Boolean!
+  organizationMemberships: [ViewerOrganizationMembership!]!
+  teamMemberships: [ViewerTeamMembership!]!
+}
+
+type Organization {
+  id: ID!
+  name: String!
+  slug: String!
+  status: String!
+}
+
+type Team {
+  id: ID!
+  organizationId: ID!
+  name: String!
+  slug: String!
+  legalName: String
+  baseCurrency: String!
+  timeZone: String!
+  locale: String!
+  status: String!
+}
+
+type ViewerOrganizationMembership {
+  organization: Organization!
+  roles: [String!]!
+}
+
+type ViewerTeamMembership {
+  team: Team!
+  roles: [String!]!
+}
+
+input CreateOrganizationInput {
+  name: String!
+  teamName: String
+  legalName: String
+  baseCurrency: String
+  timeZone: String
+  locale: String
+  clientMutationId: String!
+}
+
+type CreateOrganizationSuccess {
+  organization: Organization!
+  team: Team!
+  clientMutationId: String!
+}
+
+union CreateOrganizationResult = CreateOrganizationSuccess | ValidationProblem | AuthorizationProblem
+
+input CreateTeamInput {
+  organizationId: ID!
+  name: String!
+  legalName: String
+  baseCurrency: String
+  timeZone: String
+  locale: String
+  clientMutationId: String!
+}
+
+type CreateTeamSuccess {
+  team: Team!
+  clientMutationId: String!
+}
+
+union CreateTeamResult = CreateTeamSuccess | ValidationProblem | AuthorizationProblem
+
+input RetryOperationInput {
+  teamId: ID!
+  operationId: ID!
+  clientMutationId: String!
+}
+
+type RetryOperationSuccess {
+  operation: Operation!
+  clientMutationId: String!
+}
+
+union RetryOperationResult = RetryOperationSuccess | ValidationProblem | AuthorizationProblem
+
+"ISO 8601 calendar date, e.g. `2026-09-15`."
+scalar Date
+
+"ISO 8601 UTC timestamp, e.g. `2026-08-21T15:00:00Z`."
+scalar DateTime
+
+"""
+Arbitrary-precision decimal serialized as a string, e.g. `"12.5"`.
+Floats are rejected to protect precision.
+"""
+scalar Decimal
+
+"""
+Integer currency amount in minor units (e.g. øre/cents). Currency travels
+in a sibling field. JSON floats are rejected.
+"""
+scalar MoneyMinorUnits
+
+"""
+A JSON object (string keys, JSON-safe values). Used only where a stable
+typed structure is not yet known (SPEC §14.8 discourages generic blobs;
+usage-event properties are schema-allowlisted downstream).
+"""
+scalar Json

@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Backup verification cycle (SPEC §24.9, INV-019): restore the given archive
+# into a disposable database, run integrity checks, and report.
+# Usage: billing-core-restore-verify --source archive.tar.gz --admin-url postgres://...
+set -euo pipefail
+
+SOURCE=""
+ADMIN_URL=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source) SOURCE="$2"; shift 2 ;;
+    --admin-url) ADMIN_URL="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 64 ;;
+  esac
+done
+
+[ -n "$SOURCE" ] && [ -n "$ADMIN_URL" ] || { echo "--source and --admin-url required" >&2; exit 64; }
+
+VERIFY_DB="billing_core_restore_verify_$(date +%s)"
+STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+echo "[verify] creating disposable database $VERIFY_DB" >&2
+psql "$ADMIN_URL" -c "CREATE DATABASE ${VERIFY_DB}"
+cleanup() { psql "$ADMIN_URL" -c "DROP DATABASE IF EXISTS ${VERIFY_DB}" >/dev/null || true; }
+trap cleanup EXIT
+
+TARGET_URL="${ADMIN_URL%/*}/${VERIFY_DB}"
+
+billing-core-restore --source "$SOURCE" --database-url "$TARGET_URL" --force
+
+echo "[verify] integrity checks" >&2
+TABLES=$(psql "$TARGET_URL" -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema='billing'")
+INTENTS=$(psql "$TARGET_URL" -tAc "SELECT count(*) FROM billing.invoice_intents" 2>/dev/null || echo 0)
+AUDIT=$(psql "$TARGET_URL" -tAc "SELECT count(*) FROM billing.audit_log" 2>/dev/null || echo 0)
+
+# No-blind-write check: intent hashes must be intact.
+BADHASH=$(psql "$TARGET_URL" -tAc \
+  "SELECT count(*) FROM billing.invoice_intents WHERE content_hash !~ '^[0-9a-f]{64}$'" 2>/dev/null || echo 0)
+
+if [ "${TABLES:-0}" -lt 10 ] || [ "${BADHASH:-0}" -gt 0 ]; then
+  echo "[verify] FAILED: tables=$TABLES bad_hashes=$BADHASH" >&2
+  exit 1
+fi
+
+cat << EOF
+{
+  "result": "verified",
+  "started_at": "$STARTED",
+  "finished_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "billing_tables": $TABLES,
+  "invoice_intents": $INTENTS,
+  "audit_entries": $AUDIT,
+  "source": "$SOURCE"
+}
+EOF

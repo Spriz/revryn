@@ -1,0 +1,11 @@
+subscription:  sub-1
+customer:      cu-1
+contract:      con-1
+invoice date:  2026-09-01
+period:        2026-09-01 .. 2026-10-01 (excl)
+net amount:    250000 DKK (minor units)
+fingerprint:   fp-abc
+
+lines:
+ORD  LINE KEY  DESCRIPTION    QTY  AMOUNT (MINOR)  RECOGNITION  SERVICE
+1    lk-1      Standard plan  2    250000          over_time    2026-09-01 .. 2026-10-01

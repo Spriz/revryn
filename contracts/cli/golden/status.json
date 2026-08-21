@@ -1,0 +1,43 @@
+{
+  "data": {
+    "apiVersion": "2026-08-01",
+    "viewer": {
+      "id": "7f9d3f9a-0000-0000-0000-000000000001",
+      "status": "active",
+      "platformAdmin": false,
+      "organizationMemberships": [
+        {
+          "organization": {
+            "id": "org-1",
+            "name": "Acme",
+            "slug": "acme",
+            "status": "active"
+          },
+          "roles": [
+            "admin"
+          ]
+        }
+      ],
+      "teamMemberships": [
+        {
+          "team": {
+            "id": "team-1",
+            "organizationId": "org-1",
+            "name": "Acme DK",
+            "slug": "acme-dk",
+            "legalName": "Acme ApS",
+            "baseCurrency": "DKK",
+            "timeZone": "Europe/Copenhagen",
+            "locale": "da-DK",
+            "status": "active"
+          },
+          "roles": [
+            "finance"
+          ]
+        }
+      ]
+    }
+  },
+  "correlationId": "corr-fixed",
+  "schema": "billingctl.v1"
+}

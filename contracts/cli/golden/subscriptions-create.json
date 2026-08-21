@@ -1,0 +1,14 @@
+{
+  "data": {
+    "id": "sub-1",
+    "externalId": "ext-9",
+    "contractId": "con-1",
+    "state": "active",
+    "startsOn": "2026-09-01",
+    "timeZone": "Europe/Copenhagen",
+    "version": 1,
+    "currentVersion": 1
+  },
+  "correlationId": "corr-fixed",
+  "schema": "billingctl.v1"
+}
