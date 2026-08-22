@@ -1,5 +1,5 @@
 import { test, expect, Browser, Page } from "@playwright/test";
-import { registerAndSignIn, createWorkspace } from "../fixtures/auth";
+import { registerAndSignIn, createWorkspace, waitForLiveView } from "../fixtures/auth";
 
 /**
  * BC-US-143/144: one global identity holding conflicting roles across
@@ -20,7 +20,13 @@ async function inviteFromMembersPage(
   role: string,
 ): Promise<string> {
   await page.goto(`/teams/${teamId}/members`);
+  // Fill only after the LiveView connects: the connected render replaces
+  // the dead render's DOM and would wipe an early fill (flaky on slow CI).
+  await waitForLiveView(page);
   await page.locator("#invite-form input[name='invite[email]']").fill(email);
+  await expect(
+    page.locator("#invite-form input[name='invite[email]']"),
+  ).toHaveValue(email);
   await page
     .locator("#invite-form select[name='invite[roles][]']")
     .selectOption([role]);

@@ -5,6 +5,19 @@ import { expect, Page } from "@playwright/test";
  * virtual authenticator stands in for platform biometrics.
  */
 
+/**
+ * Waits until the page's main LiveView is websocket-connected. Filling a
+ * form during the dead render loses the input when the connected render
+ * replaces the DOM — always call this after `goto` and before `fill` on a
+ * LiveView page.
+ */
+export async function waitForLiveView(page: Page): Promise<void> {
+  await page.waitForSelector("[data-phx-main].phx-connected", {
+    state: "attached",
+    timeout: 20_000,
+  });
+}
+
 export async function enableVirtualAuthenticator(page: Page): Promise<void> {
   const client = await page.context().newCDPSession(page);
   await client.send("WebAuthn.enable");
@@ -41,6 +54,7 @@ export async function createWorkspace(
   teamName: string,
 ): Promise<string> {
   await page.goto("/start");
+  await waitForLiveView(page);
   await page.locator("#create-workspace-form input[name='workspace[name]']").fill(organizationName);
   await page
     .locator("#create-workspace-form input[name='workspace[team_name]']")
