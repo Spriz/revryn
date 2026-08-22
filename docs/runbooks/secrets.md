@@ -51,7 +51,8 @@ repo (`.gitignore` guards common file names). Tooling is pinned in
 `mise.toml` (`mise install`).
 
 ```sh
-fnox set ECONOMIC_SANDBOX_SECRET   # prompts hidden, encrypts, rewrites fnox.toml
+fnox set ECONOMIC_SANDBOX_APP_SECRET_TOKEN       # prompts hidden, encrypts,
+fnox set ECONOMIC_SANDBOX_AGREEMENT_GRANT_TOKEN  # rewrites fnox.toml
 fnox get FNOX_SANITY               # prints "ok" iff your identity can decrypt
 fnox exec -- mix run --no-start e2e/economic/certify.exs
 fnox check                         # config/provider health (no identity needed)

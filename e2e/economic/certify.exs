@@ -3,10 +3,14 @@
 # Turnkey: store the sandbox credentials once (age-encrypted into the
 # committed fnox.toml — docs/runbooks/secrets.md) and run:
 #
-#     fnox set ECONOMIC_SANDBOX_SECRET   # paste app_secret_token:agreement_grant_token
+#     fnox set ECONOMIC_SANDBOX_APP_SECRET_TOKEN        # your app's secret token
+#     fnox set ECONOMIC_SANDBOX_AGREEMENT_GRANT_TOKEN   # the sandbox agreement's grant
 #     fnox exec -- mix run --no-start e2e/economic/certify.exs
 #
-# (a plain `export ECONOMIC_SANDBOX_SECRET=...` still works.)
+# The combined form is also accepted (and is what the ERP connection's
+# secret_reference resolves at runtime — SPEC §19.5 names ONE env var):
+#     ECONOMIC_SANDBOX_SECRET="app_secret_token:agreement_grant_token"
+# Plain `export`s of either form work without fnox.
 # Optional overrides (defaults suit a fresh demo sandbox):
 #     export ECONOMIC_CERT_CUSTOMER_NUMBER=1
 #     export ECONOMIC_CERT_PRODUCT_NUMBER=1
@@ -37,17 +41,32 @@ defmodule Certify do
   @report_path "docs/reviews/economic-sandbox-certification.md"
 
   def run do
+    # Two-variable form takes precedence; it is combined into the single
+    # env var the connection's secret_reference names (SPEC §19.5).
+    app_secret = System.get_env("ECONOMIC_SANDBOX_APP_SECRET_TOKEN", "") |> String.trim()
+    grant = System.get_env("ECONOMIC_SANDBOX_AGREEMENT_GRANT_TOKEN", "") |> String.trim()
+
+    if app_secret != "" and grant != "" do
+      System.put_env("ECONOMIC_SANDBOX_SECRET", "#{app_secret}:#{grant}")
+    end
+
     secret = System.get_env("ECONOMIC_SANDBOX_SECRET")
 
     unless secret && String.contains?(secret, ":") do
       IO.puts("""
-      ECONOMIC_SANDBOX_SECRET is not set.
+      No sandbox credentials found. Set either the pair
 
-      Export it as "app_secret_token:agreement_grant_token" for your
-      e-conomic SANDBOX agreement, then rerun:
+          ECONOMIC_SANDBOX_APP_SECRET_TOKEN        (your app's secret token)
+          ECONOMIC_SANDBOX_AGREEMENT_GRANT_TOKEN   (the sandbox agreement's grant)
 
-          export ECONOMIC_SANDBOX_SECRET="...:..."
-          mix run --no-start e2e/economic/certify.exs
+      or the combined form
+
+          ECONOMIC_SANDBOX_SECRET="app_secret_token:agreement_grant_token"
+
+      for your e-conomic SANDBOX agreement (fnox set <NAME>, or plain
+      exports), then rerun:
+
+          fnox exec -- mix run --no-start e2e/economic/certify.exs
       """)
 
       System.halt(1)
@@ -168,6 +187,7 @@ defmodule Certify do
          {:ok, contract} <-
            Contracts.create_contract(scope, %{
              customer_id: customer.id,
+             external_reference: "cert-contract-#{System.unique_integer([:positive])}",
              currency: "DKK",
              start_date: Date.utc_today()
            }),

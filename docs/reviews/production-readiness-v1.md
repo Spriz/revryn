@@ -55,7 +55,8 @@ operational ledger.
 turnkey (the engineering side is prepared):**
 
 1. **e-conomic sandbox certification.** One action:
-   `fnox set ECONOMIC_SANDBOX_SECRET` (stores it age-encrypted in the
+   `fnox set ECONOMIC_SANDBOX_APP_SECRET_TOKEN` +
+   `fnox set ECONOMIC_SANDBOX_AGREEMENT_GRANT_TOKEN` (stored age-encrypted in the
    committed `fnox.toml` — `docs/runbooks/secrets.md`), then
    `fnox exec -- mix run --no-start e2e/economic/certify.exs` — the harness
    runs preflight, capabilities, and the annual-prepaid draft/read-back

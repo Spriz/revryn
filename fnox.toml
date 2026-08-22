@@ -3,7 +3,8 @@
 # Values are age-encrypted to the recipients below, so this file is safe to
 # commit; only holders of a matching age identity can decrypt. Day-to-day:
 #
-#     fnox set ECONOMIC_SANDBOX_SECRET      # prompts, encrypts, updates this file
+#     fnox set ECONOMIC_SANDBOX_APP_SECRET_TOKEN       # prompts, encrypts, updates this file
+#     fnox set ECONOMIC_SANDBOX_AGREEMENT_GRANT_TOKEN
 #     fnox exec -- mix run --no-start e2e/economic/certify.exs
 #     fnox get FNOX_SANITY                  # prints "ok" iff your identity works
 #
@@ -24,4 +25,9 @@ FNOX_SANITY= { provider = "age", value = "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNT
 # Deployment secrets (SECRET_KEY_BASE, DATABASE_URL, …) are deliberately NOT
 # catalogued here: whoever deploys Revryn owns those in their own platform's
 # secret store — see docs/runbooks/secrets.md.
-ECONOMIC_SANDBOX_SECRET = { provider = "age", description = "e-conomic sandbox credentials as app_secret_token:agreement_grant_token (SPEC §17 sandbox certification)" }
+# Preferred: the two tokens as separate secrets (the certification
+# harness combines them). The combined ECONOMIC_SANDBOX_SECRET
+# ("app:grant") is also accepted.
+ECONOMIC_SANDBOX_APP_SECRET_TOKEN = { provider = "age", value = "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBXWmljRjlJWmx5TFVzSE1SNkZiaG9KTytWNm1LVlZPeXYyUzA5K2FVbFZZCmtNVDkyUXRYaFVyVFMzMmlsY0k5Ly9kTHFubldpUHJFL0lxT2pCT1YxcWcKLT4gLC1ncmVhc2UgRm89LjtJM3cgaGcKQ3hGcTRsWnJnNTRqc3ZRRk1GVnYKLS0tIE1SZW5mdXdYN3BMd2VXMWRFTU9YKy9MRnd6RDRoN3NMbmhCUE9hVUN3NVkKU6V5xnVE0lMe6qI14lGLIeIUdinVGJupkfyWjqBSGyqNJjOoUa6gXUC7C389km6POQNDA78qhy7pcmpWF6AqC7/bX1rLLhZV5Ibe", description = "e-conomic developer app's SECRET token (not the public token/app number)" }
+ECONOMIC_SANDBOX_AGREEMENT_GRANT_TOKEN = { provider = "age", description = "grant token the SANDBOX agreement issued to that app (SPEC §17 certification)" }
+ECONOMIC_SANDBOX_SECRET = { provider = "age", description = "combined alternative: app_secret_token:agreement_grant_token" }
