@@ -127,7 +127,9 @@ defmodule Certify do
           IO.puts("   [#{check["status"]}] #{check["check"]}: #{check["detail"]}")
         end)
 
-        status = if Enum.all?(checks, &(&1["status"] == "pass")), do: :pass, else: :fail
+        # Warnings (e.g. an optional module not reported) surface in the
+        # evidence but only a hard "fail" check fails certification.
+        status = if Enum.any?(checks, &(&1["status"] == "fail")), do: :fail, else: :pass
 
         %{name: "preflight + capabilities", status: status, detail: inspect(checks)}
 

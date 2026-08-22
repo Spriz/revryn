@@ -29,7 +29,9 @@ defmodule BillingCore.ERP.Economic.BookAndUpdateTest do
       external_reference: @reference,
       document_type: :invoice,
       customer_external_id: "1001",
-      recipient: %{legal_name: "Example ApS"},
+      recipient: %{legal_name: "Example ApS", vat_zone_external_id: "1"},
+      payment_term_external_id: "14",
+      layout_external_id: "21",
       invoice_date: ~D[2026-09-01],
       currency: "DKK",
       lines: [

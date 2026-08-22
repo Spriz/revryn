@@ -341,6 +341,12 @@ defmodule BillingCore.ERP.Economic do
 
   @impl true
   def create_draft(context, %CanonicalInvoice{} = invoice, operation_key) do
+    with {:ok, invoice} <- ensure_document_defaults(context, invoice) do
+      do_create_draft(context, invoice, operation_key)
+    end
+  end
+
+  defp do_create_draft(context, %CanonicalInvoice{} = invoice, operation_key) do
     body = draft_body(invoice)
 
     case Client.post(context, "/invoices/drafts", body, operation_key) do
@@ -361,6 +367,12 @@ defmodule BillingCore.ERP.Economic do
   def update_draft(context, document_ref, invoice, operation_key)
 
   def update_draft(context, {:draft, draft_id}, %CanonicalInvoice{} = invoice, operation_key) do
+    invoice =
+      case ensure_document_defaults(context, invoice) do
+        {:ok, resolved} -> resolved
+        {:error, _reason} -> invoice
+      end
+
     body =
       invoice
       |> draft_body()
@@ -940,6 +952,89 @@ defmodule BillingCore.ERP.Economic do
     |> case do
       value when is_binary(value) -> value
       _other -> "application/pdf"
+    end
+  end
+
+  # -- document defaults (SPEC §17.4) -----------------------------------------
+
+  # e-conomic requires layout, paymentTerms, and recipient.vatZone on every
+  # draft and does NOT default them from the customer server-side. When the
+  # canonical invoice does not carry them (team settings unset, recipient
+  # snapshot without a VAT zone), resolve them from the mapped customer —
+  # its e-conomic record always has all three configured. Explicit values
+  # always win over the customer's defaults.
+  defp ensure_document_defaults(context, %CanonicalInvoice{} = invoice) do
+    if invoice.payment_term_external_id && invoice.layout_external_id &&
+         Map.get(invoice.recipient, :vat_zone_external_id) do
+      {:ok, invoice}
+    else
+      with {:ok, defaults} <- customer_defaults(context, invoice.customer_external_id),
+           {:ok, payment_term} <-
+             fallback_number(
+               context,
+               invoice.payment_term_external_id || defaults.payment_term,
+               "/payment-terms",
+               "paymentTermsNumber"
+             ),
+           {:ok, layout} <-
+             fallback_number(
+               context,
+               invoice.layout_external_id || defaults.layout,
+               "/layouts",
+               "layoutNumber"
+             ) do
+        recipient =
+          case Map.get(invoice.recipient, :vat_zone_external_id) do
+            nil -> Map.put(invoice.recipient, :vat_zone_external_id, defaults.vat_zone)
+            _present -> invoice.recipient
+          end
+
+        {:ok,
+         %{
+           invoice
+           | recipient: recipient,
+             payment_term_external_id: payment_term,
+             layout_external_id: layout
+         }}
+      end
+    end
+  end
+
+  # Last rung: the agreement's first layout / payment term. Safe because
+  # drafts are human-reviewed before booking (ADR-009 draft-first); the
+  # VAT zone deliberately has NO such fallback — guessing it would mean
+  # wrong VAT, so it must come from the customer or the recipient snapshot.
+  defp fallback_number(_context, value, _url, _field) when is_binary(value), do: {:ok, value}
+
+  defp fallback_number(context, nil, url, field) do
+    case Client.get(context, url, params: [pagesize: 1]) do
+      {:ok, %{status: status, body: body}} when status in 200..299 ->
+        first = body |> Map.get("collection", []) |> List.first() || %{}
+        {:ok, stringify(first[field])}
+
+      {:ok, response} ->
+        {:error, classify(response)}
+
+      {:error, {:transport, reason}} ->
+        {:error, {:provider_failure, reason}}
+    end
+  end
+
+  defp customer_defaults(context, customer_number) do
+    case Client.get(context, "/customers/#{customer_number}") do
+      {:ok, %{status: status, body: body}} when status in 200..299 and is_map(body) ->
+        {:ok,
+         %{
+           payment_term: stringify(get_in(body, ["paymentTerms", "paymentTermsNumber"])),
+           layout: stringify(get_in(body, ["layout", "layoutNumber"])),
+           vat_zone: stringify(get_in(body, ["vatZone", "vatZoneNumber"]))
+         }}
+
+      {:ok, response} ->
+        {:error, classify(response)}
+
+      {:error, {:transport, reason}} ->
+        {:error, {:provider_failure, reason}}
     end
   end
 
