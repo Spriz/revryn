@@ -5,6 +5,18 @@
 # (the metrics exporter moves off the server's port), or
 # `bin/billing_core eval "$(cat e2e/cli/fixture.exs)"` against a release.
 Application.put_env(:billing_core, :metrics_port, 19_568)
+
+# Never bind the web listener from the fixture: releases export
+# PHX_SERVER=true via rel/env.sh.eex, and the real server already holds
+# the port.
+endpoint_config = Application.get_env(:billing_core, BillingCoreWeb.Endpoint, [])
+
+Application.put_env(
+  :billing_core,
+  BillingCoreWeb.Endpoint,
+  Keyword.put(endpoint_config, :server, false)
+)
+
 {:ok, _} = Application.ensure_all_started(:billing_core)
 
 alias BillingCore.{Contracts, Credits, Identity, Orgs}
@@ -37,7 +49,8 @@ membership =
     country: "DK"
   })
 
-account = # organization-level commercial account projected to the team
+# organization-level commercial account projected to the team
+account =
   (fn ->
      {:ok, account} =
        Orgs.create_account(
@@ -45,6 +58,7 @@ account = # organization-level commercial account projected to the team
          %{external_id: "cli-acct-#{suffix}", display_name: "Cert account #{suffix}"},
          scope
        )
+
      {:ok, _} = Orgs.project_account_to_team(account, team, customer.id, scope)
      account
    end).()

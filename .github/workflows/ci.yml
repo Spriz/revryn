@@ -187,10 +187,14 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: clients/revryn/go.mod
+          cache-dependency-path: clients/revryn/go.sum
 
       - name: CLI and MCP certification against the release (BC-TASK-100)
         env:
           SECRET_KEY_BASE: ci-only-secret-key-base-0000000000000000000000000000000000000000
+          # The release's env.sh exports PHX_SERVER=true by default; the
+          # fixture eval must not bind the port the daemon already holds.
+          WEB_SERVER: "false"
         run: |
           FIXTURE_JSON="$(_build/prod/rel/billing_core/bin/billing_core eval "$(cat e2e/cli/fixture.exs)" | grep '^{' | tail -1)"
           export FIXTURE_JSON
