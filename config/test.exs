@@ -11,7 +11,7 @@ config :billing_core, BillingCore.Repo,
   username: "postgres",
   password: "postgres",
   hostname: "127.0.0.1",
-  port: 55432,
+  port: 55_432,
   database: "billing_core_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2

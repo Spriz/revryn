@@ -68,8 +68,7 @@ defmodule BillingCore.ERP.Description do
     # Normalize each row separately so the two-line §17.6 format survives
     # normalization (normalize_text strips newline control characters).
     [headline, usage]
-    |> Enum.map(&Fingerprint.normalize_text/1)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", &Fingerprint.normalize_text/1)
     |> truncate_keeping_ref(line_ref, max_length)
   end
 

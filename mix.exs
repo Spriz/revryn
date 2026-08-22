@@ -119,6 +119,7 @@ defmodule BillingCore.MixProject do
         "compile --warnings-as-errors",
         "deps.unlock --unused",
         "format",
+        "credo",
         "dialyzer",
         "test"
       ]

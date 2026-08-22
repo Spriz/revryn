@@ -905,42 +905,40 @@ defmodule BillingCore.ERP.FakeERP do
   ## Finance-voucher operations
 
   defp do_create_voucher(state, %FinanceVoucher{} = voucher) do
-    cond do
-      not state.capabilities.supports_finance_vouchers ->
-        {{:error, {:unsupported_capability, :finance_vouchers}}, state}
+    if state.capabilities.supports_finance_vouchers do
+      case FinanceVoucher.validate(voucher) do
+        :ok ->
+          case Map.fetch(state.voucher_by_reference, voucher.external_reference) do
+            {:ok, number} ->
+              {{:error,
+                {:conflict,
+                 %{
+                   reason: :duplicate_external_reference,
+                   external_reference: voucher.external_reference,
+                   existing: {:voucher, number}
+                 }}}, state}
 
-      true ->
-        case FinanceVoucher.validate(voucher) do
-          :ok ->
-            case Map.fetch(state.voucher_by_reference, voucher.external_reference) do
-              {:ok, number} ->
-                {{:error,
-                  {:conflict,
-                   %{
-                     reason: :duplicate_external_reference,
-                     external_reference: voucher.external_reference,
-                     existing: {:voucher, number}
-                   }}}, state}
+            :error ->
+              number = Integer.to_string(state.next_voucher_number)
+              normalized = normalize_voucher(voucher, number)
 
-              :error ->
-                number = Integer.to_string(state.next_voucher_number)
-                normalized = normalize_voucher(voucher, number)
+              state =
+                state
+                |> Map.update!(:vouchers, &Map.put(&1, number, normalized))
+                |> Map.update!(
+                  :voucher_by_reference,
+                  &Map.put(&1, voucher.external_reference, number)
+                )
+                |> Map.put(:next_voucher_number, state.next_voucher_number + 1)
 
-                state =
-                  state
-                  |> Map.update!(:vouchers, &Map.put(&1, number, normalized))
-                  |> Map.update!(
-                    :voucher_by_reference,
-                    &Map.put(&1, voucher.external_reference, number)
-                  )
-                  |> Map.put(:next_voucher_number, state.next_voucher_number + 1)
+              {{:ok, normalized}, state}
+          end
 
-                {{:ok, normalized}, state}
-            end
-
-          {:error, errors} ->
-            {{:error, {:validation, errors}}, state}
-        end
+        {:error, errors} ->
+          {{:error, {:validation, errors}}, state}
+      end
+    else
+      {{:error, {:unsupported_capability, :finance_vouchers}}, state}
     end
   end
 
@@ -1028,9 +1026,8 @@ defmodule BillingCore.ERP.FakeERP do
   defp durable_payload(state), do: Map.take(state, @durable_snapshot_keys)
 
   defp restore_snapshot(state, snapshot) do
-    with {:ok, durable} <- decode_valid_snapshot(snapshot) do
-      {:ok, Map.merge(state, durable)}
-    else
+    case decode_valid_snapshot(snapshot) do
+      {:ok, durable} -> {:ok, Map.merge(state, durable)}
       {:error, reason} -> {:stop, {:invalid_snapshot, reason}}
     end
   end

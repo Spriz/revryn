@@ -119,29 +119,30 @@ defmodule BillingCoreWeb.GraphQL.Resolvers.Contracts do
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
 
-    with :ok <- check_expected_version(scope, input) do
-      outcome =
-        Idempotency.run(
-          Scope.team_id!(scope),
-          "upsert_customer",
-          input.idempotency_key,
-          Authz.principal_id(scope),
-          canonical_input(input),
-          fn ->
-            case Contracts.upsert_customer(scope, attrs) do
-              {:ok, %{customer: customer}} -> {:ok, %{"resource_reference" => customer.id}}
-              {:error, reason} -> {:error, reason}
-            end
-          end
-        )
-
-      case resolve_outcome(outcome, scope, &Contracts.get_customer/2) do
-        {:ok, customer} -> {:ok, %{customer: customer, client_mutation_id: cmid}}
-        {:error, reason} -> {:ok, Errors.business_error(reason, cmid)}
-      end
-    else
+    case check_expected_version(scope, input) do
       {:version_conflict, expected, actual} ->
         {:ok, Errors.version_conflict(expected, actual, cmid)}
+
+      :ok ->
+        outcome =
+          Idempotency.run(
+            Scope.team_id!(scope),
+            "upsert_customer",
+            input.idempotency_key,
+            Authz.principal_id(scope),
+            canonical_input(input),
+            fn ->
+              case Contracts.upsert_customer(scope, attrs) do
+                {:ok, %{customer: customer}} -> {:ok, %{"resource_reference" => customer.id}}
+                {:error, reason} -> {:error, reason}
+              end
+            end
+          )
+
+        case resolve_outcome(outcome, scope, &Contracts.get_customer/2) do
+          {:ok, customer} -> {:ok, %{customer: customer, client_mutation_id: cmid}}
+          {:error, reason} -> {:ok, Errors.business_error(reason, cmid)}
+        end
     end
   end
 

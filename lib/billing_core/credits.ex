@@ -353,20 +353,18 @@ defmodule BillingCore.Credits do
         ) :: {:ok, [{Ecto.UUID.t(), pos_integer()}]} | {:error, term()}
   def reserve(actor, %CreditAccount{} = account, amount_minor, idempotency_key, opts \\ [])
       when is_integer(amount_minor) and is_binary(idempotency_key) do
-    cond do
-      amount_minor <= 0 ->
-        {:error, :invalid_amount}
+    if amount_minor <= 0 do
+      {:error, :invalid_amount}
+    else
+      with_locked_account(actor, account, fn locked ->
+        case batch_allocations(locked, :reserve, idempotency_key) do
+          [_ | _] = replay ->
+            replay
 
-      true ->
-        with_locked_account(actor, account, fn locked ->
-          case batch_allocations(locked, :reserve, idempotency_key) do
-            [_ | _] = replay ->
-              replay
-
-            [] ->
-              do_reserve(actor, locked, amount_minor, idempotency_key, opts)
-          end
-        end)
+          [] ->
+            do_reserve(actor, locked, amount_minor, idempotency_key, opts)
+        end
+      end)
     end
   end
 

@@ -62,10 +62,9 @@ defmodule BillingCore.Billing.PreviewFlatFeeTest do
     amounts =
       preview.lines
       |> Enum.map(fn line ->
-        cond do
-          String.contains?(line.line_key, ":seat:") -> {:seat, line.amount_minor}
-          true -> {:base, line.amount_minor}
-        end
+        if String.contains?(line.line_key, ":seat:"),
+          do: {:seat, line.amount_minor},
+          else: {:base, line.amount_minor}
       end)
       |> Map.new()
 

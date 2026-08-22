@@ -282,26 +282,28 @@ defmodule BillingCoreWeb.SubscriptionLive.Show do
   end
 
   def handle_event("change_quantity", %{"quantity" => params}, socket) do
-    with {:ok, quantity} <- LiveHelpers.parse_decimal(params["quantity"]) do
-      attrs =
-        case LiveHelpers.parse_date(params["effective_date"]) do
-          {:ok, date} -> %{quantity: quantity, effective_date: date}
-          :error -> %{quantity: quantity}
+    case LiveHelpers.parse_decimal(params["quantity"]) do
+      :error ->
+        {:noreply, put_flash(socket, :error, "Enter a valid quantity.")}
+
+      {:ok, quantity} ->
+        attrs =
+          case LiveHelpers.parse_date(params["effective_date"]) do
+            {:ok, date} -> %{quantity: quantity, effective_date: date}
+            :error -> %{quantity: quantity}
+          end
+
+        case Contracts.change_quantity(socket.assigns.scope, socket.assigns.subscription, attrs) do
+          {:ok, subscription} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Quantity changed.")
+             |> assign(subscription: subscription, preview: nil)
+             |> refresh()}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, LiveHelpers.error_message(reason))}
         end
-
-      case Contracts.change_quantity(socket.assigns.scope, socket.assigns.subscription, attrs) do
-        {:ok, subscription} ->
-          {:noreply,
-           socket
-           |> put_flash(:info, "Quantity changed.")
-           |> assign(subscription: subscription, preview: nil)
-           |> refresh()}
-
-        {:error, reason} ->
-          {:noreply, put_flash(socket, :error, LiveHelpers.error_message(reason))}
-      end
-    else
-      :error -> {:noreply, put_flash(socket, :error, "Enter a valid quantity.")}
     end
   end
 

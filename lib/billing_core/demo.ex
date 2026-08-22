@@ -42,9 +42,8 @@ defmodule BillingCore.Demo do
   @spec start_workspace(User.t()) :: {:ok, bundle()} | {:error, term()}
   def start_workspace(%User{} = user) do
     with :ok <- public_user_allowed(user),
-         {:ok, workspace} <- provision_phase_a(user, nil),
-         {:ok, bundle} <- activate_workspace(user, workspace.id) do
-      {:ok, bundle}
+         {:ok, workspace} <- provision_phase_a(user, nil) do
+      activate_workspace(user, workspace.id)
     end
   end
 
@@ -185,9 +184,8 @@ defmodule BillingCore.Demo do
     with :ok <- public_user_allowed(user),
          {:ok, {next_workspace, old_connection_id}} <-
            with_advisory_lock(user.id, fn -> reset_phase_a_locked!(user) end),
-         :ok <- stop_old_provider(old_connection_id),
-         {:ok, bundle} <- activate_workspace(user, next_workspace.id) do
-      {:ok, bundle}
+         :ok <- stop_old_provider(old_connection_id) do
+      activate_workspace(user, next_workspace.id)
     end
   end
 
@@ -235,22 +233,24 @@ defmodule BillingCore.Demo do
   # Phase B starts only against already committed rows. Failed validation does
   # not delete or mutate the provisioning generation, so resume can retry it.
   defp activate_workspace(%User{} = user, workspace_id) do
-    with %Connection{} = connection <- connection_for_workspace(workspace_id) do
-      was_running? =
-        match?({:ok, _}, BillingCore.ERP.FakeERP.InstanceSupervisor.fetch(connection.id))
+    case connection_for_workspace(workspace_id) do
+      nil ->
+        {:error, :not_found}
 
-      case with_advisory_lock(user.id, fn -> activate_workspace_locked!(user, workspace_id) end) do
-        {:ok, bundle} ->
-          {:ok, bundle}
+      %Connection{} = connection ->
+        was_running? =
+          match?({:ok, _}, BillingCore.ERP.FakeERP.InstanceSupervisor.fetch(connection.id))
 
-        {:error, reason} ->
-          if not was_running?,
-            do: _ = BillingCore.ERP.FakeERP.InstanceSupervisor.stop(connection.id)
+        case with_advisory_lock(user.id, fn -> activate_workspace_locked!(user, workspace_id) end) do
+          {:ok, bundle} ->
+            {:ok, bundle}
 
-          {:error, reason}
-      end
-    else
-      nil -> {:error, :not_found}
+          {:error, reason} ->
+            if not was_running?,
+              do: _ = BillingCore.ERP.FakeERP.InstanceSupervisor.stop(connection.id)
+
+            {:error, reason}
+        end
     end
   end
 
@@ -358,10 +358,12 @@ defmodule BillingCore.Demo do
         payload: %{generation: archived.generation, reason: "reset"}
       )
 
-      with {:ok, _} <- remove_owner_membership(bundle) do
-        {provision_phase_a_locked!(user, archived.id), instance.erp_connection_id}
-      else
-        {:error, reason} -> Repo.rollback(reason)
+      case remove_owner_membership(bundle) do
+        {:ok, _} ->
+          {provision_phase_a_locked!(user, archived.id), instance.erp_connection_id}
+
+        {:error, reason} ->
+          Repo.rollback(reason)
       end
     else
       nil -> Repo.rollback(:not_found)
