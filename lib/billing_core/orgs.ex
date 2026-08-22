@@ -28,6 +28,8 @@ defmodule BillingCore.Orgs do
 
   import Ecto.Query
 
+  require Logger
+
   alias BillingCore.{Audit, Repo, Scope}
   alias BillingCore.Domain.Canonical
   alias BillingCore.Identity.User
@@ -1244,9 +1246,18 @@ defmodule BillingCore.Orgs do
         "url" => accept_url_fun.(token)
       })
 
-    case BillingCore.Mailer.deliver(email) do
-      {:ok, _metadata} -> :sent
-      {:error, _reason} -> :failed
+    # Delivery is best-effort: the invitation link shown in the UI is the
+    # primary path, so a crashing mail transport must degrade to :failed
+    # rather than take down the caller (e.g. the members LiveView).
+    try do
+      case BillingCore.Mailer.deliver(email) do
+        {:ok, _metadata} -> :sent
+        {:error, _reason} -> :failed
+      end
+    catch
+      kind, reason ->
+        Logger.warning("invitation email delivery crashed: #{inspect({kind, reason})}")
+        :failed
     end
   end
 

@@ -163,6 +163,13 @@ if config_env() == :prod do
       ],
       auth: if(smtp_username, do: :always, else: :never),
       retries: 1
+  else
+    # No SMTP relay configured: select the explicit no-transport adapter.
+    # The compile-time default (Swoosh.Adapters.Local) is unusable in a
+    # release — prod.exs disables its storage process — and crashes any
+    # caller mid-delivery; NoTransport returns {:error, :no_mail_transport}
+    # so flows degrade to their link-only paths.
+    config :billing_core, BillingCore.Mailer, adapter: BillingCore.Mailer.NoTransport
   end
 
   config :billing_core, :mail,
