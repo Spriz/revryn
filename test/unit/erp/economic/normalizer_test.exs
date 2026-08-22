@@ -155,6 +155,48 @@ defmodule BillingCore.ERP.Economic.NormalizerTest do
     refute changed.external_hash == document.external_hash
   end
 
+  test "string-typed monetary values parse exactly" do
+    payload =
+      decode("""
+      {
+        "draftInvoiceNumber": 9,
+        "date": "2026-01-01",
+        "currency": "DKK",
+        "references": {"other": "abc:t1:intent-4:v1"},
+        "lines": [
+          {"sortKey": 1, "product": {"productNumber": "A"}, "description": "a",
+           "quantity": 1, "unitNetPrice": "12.34"}
+        ]
+      }
+      """)
+
+    assert %Document{lines: [line]} = Normalizer.normalize(payload, :draft)
+    assert line.amount == Money.new!("DKK", 1234)
+  end
+
+  test "Decimal-typed identifier numbers stringify canonically" do
+    # floats: :decimals turns any JSON number with a fraction part into a
+    # Decimal, including identifiers a provider emits as 421.0; those must
+    # stringify without scientific notation or a trailing fraction.
+    # (The stringify/1 catch-all for non-JSON value types is defensive and
+    # unreachable through decoded provider payloads.)
+    payload =
+      decode("""
+      {
+        "draftInvoiceNumber": 421.0,
+        "date": "2026-01-01",
+        "currency": "DKK",
+        "customer": {"customerNumber": 1001.0},
+        "references": {"other": "abc:t1:intent-5:v1"},
+        "lines": []
+      }
+      """)
+
+    document = Normalizer.normalize(payload, :draft)
+    assert document.external_draft_id == "421"
+    assert document.customer_external_id == "1001"
+  end
+
   test "rejects binary floats in payloads (INV-006)" do
     payload = %{
       "date" => "2026-01-01",

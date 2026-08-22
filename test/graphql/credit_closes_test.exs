@@ -424,6 +424,299 @@ defmodule BillingCoreWeb.GraphQL.CreditClosesTest do
     assert replacement["closingMinor"] == 9_000
   end
 
+  # Not covered on purpose in the CreditCloses resolvers: the listing/report
+  # `:unauthorized` branches (every canonical team role has close read
+  # access), the `stringify` nil guard (all stringified columns are
+  # non-null for rows the API can create), the `actor_user_id` non-user
+  # fallback (HTTP scopes always carry a user), and the
+  # `safe_get_operation` rescue (posting outcomes always reference a live
+  # operation row).
+
+  test "creditCloses lists with state and currency filters; lookups miss safely", ctx do
+    create_policy!(ctx)
+    %{"creditClose" => close} = generate!(ctx, "gen-list")
+
+    listing = """
+    query Closes($teamId: ID!, $state: String, $currency: String) {
+      creditCloses(teamId: $teamId, state: $state, currency: $currency) { id state currency }
+    }
+    """
+
+    {200, %{"data" => %{"creditCloses" => ready}}} =
+      gql(ctx.conn, listing,
+        token: ctx.token,
+        variables: %{"teamId" => ctx.team.id, "state" => "ready", "currency" => "DKK"}
+      )
+
+    assert Enum.map(ready, & &1["id"]) == [close["id"]]
+
+    {200, %{"data" => %{"creditCloses" => closed}}} =
+      gql(ctx.conn, listing,
+        token: ctx.token,
+        variables: %{"teamId" => ctx.team.id, "state" => "closed"}
+      )
+
+    assert closed == []
+
+    lookup = """
+    query Close($teamId: ID!, $id: ID!) {
+      creditClose(teamId: $teamId, id: $id) { id }
+    }
+    """
+
+    for bad_id <- [Ecto.UUID.generate(), "not-a-uuid"] do
+      {200, body} =
+        gql(ctx.conn, lookup,
+          token: ctx.token,
+          variables: %{"teamId" => ctx.team.id, "id" => bad_id}
+        )
+
+      assert body["data"]["creditClose"] == nil
+      assert [%{"code" => "NOT_FOUND"} | _] = body["errors"]
+    end
+  end
+
+  test "a ready close has no voucher yet; report misses are typed or null", ctx do
+    create_policy!(ctx)
+    %{"creditClose" => close} = generate!(ctx, "gen-report-miss")
+
+    # Voucher number resolves to null until the posting reconciles, and a
+    # valid-but-absent evidence type resolves to a null report without an
+    # error entry.
+    absent_report = """
+    query Close($teamId: ID!, $id: ID!) {
+      creditClose(teamId: $teamId, id: $id) {
+        externalVoucherNumber
+        report(evidenceType: "reconciliation") { sha256 }
+      }
+    }
+    """
+
+    {200, body} =
+      gql(ctx.conn, absent_report,
+        token: ctx.token,
+        variables: %{"teamId" => ctx.team.id, "id" => close["id"]}
+      )
+
+    refute body["errors"]
+    assert body["data"]["creditClose"]["externalVoucherNumber"] == nil
+    assert body["data"]["creditClose"]["report"] == nil
+
+    # An evidence type outside the canonical set is NOT_FOUND.
+    unknown_report = """
+    query Close($teamId: ID!, $id: ID!) {
+      creditClose(teamId: $teamId, id: $id) {
+        report(evidenceType: "hogwash") { sha256 }
+      }
+    }
+    """
+
+    {200, unknown_body} =
+      gql(ctx.conn, unknown_report,
+        token: ctx.token,
+        variables: %{"teamId" => ctx.team.id, "id" => close["id"]}
+      )
+
+    assert [%{"code" => "NOT_FOUND"} | _] = unknown_body["errors"]
+  end
+
+  test "policy versions increment; invalid settlement modes are typed", ctx do
+    first = create_policy!(ctx)
+    assert first["version"] == 1
+
+    second = create_policy!(ctx)
+    assert second["version"] == 2
+
+    mutation = """
+    mutation CreatePolicy($input: CreateCreditClosePolicyInput!) {
+      createCreditClosePolicy(input: $input) {
+        __typename
+        ... on ValidationProblem { code }
+      }
+    }
+    """
+
+    {200, %{"data" => %{"createCreditClosePolicy" => payload}}} =
+      gql(ctx.conn, mutation,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "teamId" => ctx.team.id,
+            "effectiveFrom" => Date.to_iso8601(Date.beginning_of_month(Date.utc_today())),
+            "journalNumber" => 1,
+            "liabilityAccountNumber" => 2990,
+            "defaultOffsetAccountNumber" => 5890,
+            "settlementMode" => "carrier-pigeon",
+            "clientMutationId" => "policy-bad-mode"
+          }
+        }
+      )
+
+    assert payload["__typename"] == "ValidationProblem"
+    assert payload["code"] == "INVALID_SETTLEMENT_MODE"
+  end
+
+  test "generation pins an explicit policy version and fails without any policy", ctx do
+    policy = create_policy!(ctx)
+
+    mutation = """
+    mutation Generate($input: GenerateCreditCloseInput!) {
+      generateCreditClose(input: $input) {
+        __typename
+        ... on GenerateCreditCloseSuccess { creditClose { id state } }
+        ... on ValidationProblem { code }
+      }
+    }
+    """
+
+    {200, %{"data" => %{"generateCreditClose" => pinned}}} =
+      gql(ctx.conn, mutation,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "teamId" => ctx.team.id,
+            "currency" => "DKK",
+            "periodDate" => Date.to_iso8601(Date.utc_today()),
+            "policyVersionId" => policy["id"],
+            "bootstrapOpeningMinor" => 0,
+            "idempotencyKey" => "gen-pinned",
+            "clientMutationId" => "gen-pinned"
+          }
+        }
+      )
+
+    assert %{"__typename" => "GenerateCreditCloseSuccess"} = pinned
+
+    # A team without a posting policy cannot generate at all.
+    unpoliced = register_actor([:team_admin, :billing_admin, :finance_operator])
+
+    {200, %{"data" => %{"generateCreditClose" => refused}}} =
+      gql(ctx.conn, mutation,
+        token: unpoliced.token,
+        variables: %{
+          "input" => %{
+            "teamId" => unpoliced.team.id,
+            "currency" => "DKK",
+            "periodDate" => Date.to_iso8601(Date.utc_today()),
+            "idempotencyKey" => "gen-unpoliced",
+            "clientMutationId" => "gen-unpoliced"
+          }
+        }
+      )
+
+    assert refused["__typename"] == "ValidationProblem"
+    assert refused["code"] == "CLOSE_POLICY_NOT_EFFECTIVE"
+  end
+
+  test "lifecycle commands out of order are typed problems, not crashes", ctx do
+    create_policy!(ctx)
+    %{"creditClose" => close} = generate!(ctx, "gen-out-of-order")
+
+    approve = """
+    mutation Approve($input: ApproveCreditCloseInput!) {
+      approveCreditClose(input: $input) {
+        __typename
+        ... on ValidationProblem { code }
+      }
+    }
+    """
+
+    # Approving a missing or malformed close ID is NOT_FOUND.
+    for bad_id <- [Ecto.UUID.generate(), "not-a-uuid"] do
+      {200, %{"data" => %{"approveCreditClose" => payload}}} =
+        gql(ctx.conn, approve,
+          token: ctx.token,
+          variables: %{
+            "input" => %{
+              "teamId" => ctx.team.id,
+              "creditCloseId" => bad_id,
+              "clientMutationId" => "approve-miss"
+            }
+          }
+        )
+
+      assert payload["__typename"] == "ValidationProblem"
+      assert payload["code"] == "NOT_FOUND"
+    end
+
+    # Posting a close that was never approved is refused by state.
+    post = """
+    mutation Post($input: RequestCreditClosePostingInput!) {
+      requestCreditClosePosting(input: $input) {
+        __typename
+        ... on ValidationProblem { code }
+      }
+    }
+    """
+
+    {200, %{"data" => %{"requestCreditClosePosting" => posted}}} =
+      gql(ctx.conn, post,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "teamId" => ctx.team.id,
+            "creditCloseId" => close["id"],
+            "idempotencyKey" => "post-early",
+            "clientMutationId" => "post-early"
+          }
+        }
+      )
+
+    assert posted["__typename"] == "ValidationProblem"
+    assert posted["code"] == "INVALID_CLOSE_STATE"
+
+    # Reversing a close that is not yet accepted is refused by state.
+    reversal = """
+    mutation Reverse($input: RequestCreditCloseReversalInput!) {
+      requestCreditCloseReversal(input: $input) {
+        __typename
+        ... on ValidationProblem { code }
+      }
+    }
+    """
+
+    {200, %{"data" => %{"requestCreditCloseReversal" => reversed}}} =
+      gql(ctx.conn, reversal,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "teamId" => ctx.team.id,
+            "creditCloseId" => close["id"],
+            "reason" => "premature",
+            "clientMutationId" => "reverse-early"
+          }
+        }
+      )
+
+    assert reversed["__typename"] == "ValidationProblem"
+    assert reversed["code"] == "INVALID_CLOSE_STATE"
+
+    # Accepting the period before reconciliation is an illegal transition.
+    close_period = """
+    mutation ClosePeriod($input: CloseCreditPeriodInput!) {
+      closeCreditPeriod(input: $input) {
+        __typename
+        ... on ValidationProblem { code }
+      }
+    }
+    """
+
+    {200, %{"data" => %{"closeCreditPeriod" => closed}}} =
+      gql(ctx.conn, close_period,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "teamId" => ctx.team.id,
+            "creditCloseId" => close["id"],
+            "clientMutationId" => "close-early"
+          }
+        }
+      )
+
+    assert closed["__typename"] == "ValidationProblem"
+    assert closed["code"] == "ILLEGAL_CLOSE_TRANSITION"
+  end
+
   test "cross-team access is rejected without leaking the close", ctx do
     create_policy!(ctx)
     %{"creditClose" => close} = generate!(ctx, "gen-cross")

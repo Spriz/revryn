@@ -81,7 +81,9 @@ defmodule BillingCore.Billing.Preview do
 
       {charge_lines, blockers} = rate_components(component_models, ctx)
 
-      discount_structs = discount_structs(scope, subscription, contract)
+      discount_structs =
+        discount_structs(scope, subscription, contract, billing_period.start_date)
+
       {lines, net} = apply_discounts(charge_lines, discount_structs, plan_version.currency)
 
       {credit_account, credit_available} =
@@ -503,17 +505,36 @@ defmodule BillingCore.Billing.Preview do
 
   ## Discounts
 
-  defp discount_structs(scope, subscription, contract) do
-    {:ok, assignments} =
-      Catalog.list_discount_assignments(scope,
-        subscription_id: subscription.id,
-        contract_id: contract.id
-      )
+  defp discount_structs(scope, subscription, contract, period_start) do
+    # An assignment targets exactly one of contract or subscription
+    # (BC-US-060), so applicable assignments are the union of two separate
+    # lookups — a single query filtering on both columns can never match
+    # (that conjunction silently disabled discounts in previews).
+    {:ok, subscription_assignments} =
+      Catalog.list_discount_assignments(scope, subscription_id: subscription.id)
 
-    assignments
-    |> Enum.filter(&(&1.status == :active))
+    {:ok, contract_assignments} =
+      Catalog.list_discount_assignments(scope, contract_id: contract.id)
+
+    (subscription_assignments ++ contract_assignments)
+    |> Enum.sort_by(& &1.created_at, DateTime)
+    |> Enum.filter(&(&1.status == :active and assignment_effective?(&1, period_start)))
     |> Enum.map(&load_discount_struct/1)
     |> Enum.reject(&is_nil/1)
+  end
+
+  # Half-open effectivity at the invoice period start, mirroring the
+  # subscription-version convention: [effective_from, effective_until).
+  defp assignment_effective?(assignment, period_start) do
+    from_ok =
+      is_nil(assignment.effective_from) or
+        not Date.before?(period_start, assignment.effective_from)
+
+    until_ok =
+      is_nil(assignment.effective_until_exclusive) or
+        Date.before?(period_start, assignment.effective_until_exclusive)
+
+    from_ok and until_ok
   end
 
   defp load_discount_struct(assignment) do
@@ -573,7 +594,7 @@ defmodule BillingCore.Billing.Preview do
         }
       end)
 
-    result = Discounts.apply_discounts(eligible, discounts)
+    {:ok, result} = Discounts.apply_discounts(eligible, discounts)
     by_key = Map.new(charge_lines, &{&1.line_key, &1})
     next_ordinal = charge_lines |> Enum.map(& &1.ordinal) |> Enum.max(fn -> -1 end) |> Kernel.+(1)
 

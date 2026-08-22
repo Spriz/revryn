@@ -86,13 +86,7 @@ defmodule BillingCore.Credits.SettlementPosting do
         {:ok, voucher, operation}
 
       {:unknown, _hint} ->
-        operation =
-          Operations.record_failure!(operation, :outcome_unknown,
-            code: "provider_response_lost",
-            summary: "settlement voucher response lost"
-          )
-
-        operation = Operations.transition!(operation, :reconcile)
+        operation = note_outcome_unknown(operation)
 
         case adapter.find_finance_voucher(context, expected.external_reference) do
           {:ok, %Voucher{} = voucher} -> {:ok, voucher, operation}
@@ -238,17 +232,40 @@ defmodule BillingCore.Credits.SettlementPosting do
     :ok
   end
 
+  # First provider write already lost its outcome: subsequent runs must
+  # not re-record a failure on the reconciling operation (record_failure!/3
+  # accepts executing operations only).
+  defp note_outcome_unknown(%{state: "executing"} = operation) do
+    operation
+    |> Operations.record_failure!(:outcome_unknown,
+      code: "provider_response_lost",
+      summary: "settlement voucher response lost"
+    )
+    |> Operations.transition!(:reconcile)
+  end
+
+  defp note_outcome_unknown(%{state: "reconciling"} = operation), do: operation
+
   defp provider_error!(sync_operation, operation, _settlement, error) do
     {class, opts} = classify(error)
 
-    if operation.state == "executing" do
-      operation = Operations.record_failure!(operation, class, opts)
-      state = if operation.state == "retry_scheduled", do: "retry_scheduled", else: "failed"
-      update_sync!(sync_operation, state, %{"error" => safe_error(error)})
-      if operation.state == "retry_scheduled", do: {:snooze, 1}, else: :ok
-    else
-      update_sync!(sync_operation, "failed", %{"error" => safe_error(error)})
-      :ok
+    case operation.state do
+      "executing" ->
+        operation = Operations.record_failure!(operation, class, opts)
+        state = if operation.state == "retry_scheduled", do: "retry_scheduled", else: "failed"
+        update_sync!(sync_operation, state, %{"error" => safe_error(error)})
+        if operation.state == "retry_scheduled", do: {:snooze, 1}, else: :ok
+
+      "reconciling" ->
+        # The outcome is still unknown; the operation stays parked in
+        # `reconciling` and the snoozed job resumes the reconciliation
+        # (claim/1 accepts it back).
+        update_sync!(sync_operation, "reconciling", %{"error" => safe_error(error)})
+        {:snooze, 30}
+
+      _other ->
+        update_sync!(sync_operation, "failed", %{"error" => safe_error(error)})
+        :ok
     end
   end
 
@@ -279,6 +296,11 @@ defmodule BillingCore.Credits.SettlementPosting do
 
   defp claim(%{state: "retry_scheduled"} = operation),
     do: {:ok, Operations.transition!(operation, :retry)}
+
+  # A provider error during unknown-outcome reconciliation parks the
+  # operation in `reconciling` (the machine has no failure edge from
+  # there); the snoozed job resumes by proving the outcome again.
+  defp claim(%{state: "reconciling"} = operation), do: {:ok, operation}
 
   defp claim(_operation), do: :not_runnable
 

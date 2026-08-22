@@ -103,6 +103,57 @@ defmodule BillingCoreWeb.GraphQL.ViewerScopeTest do
       assert [%{"code" => "UNAUTHORIZED"} | _] = body["errors"]
     end
 
+    test "organization and team resolve singly through the explicit scope", %{conn: conn} do
+      %{organization: organization, team: team, token: token} = register_actor()
+
+      query = """
+      query Single($organizationId: ID!, $teamId: ID!) {
+        organization(organizationId: $organizationId) { id name status }
+        team(teamId: $teamId) { id name organizationId }
+      }
+      """
+
+      {200, %{"data" => data}} =
+        gql(conn, query,
+          token: token,
+          variables: %{"organizationId" => organization.id, "teamId" => team.id}
+        )
+
+      assert data["organization"]["id"] == organization.id
+
+      assert data["team"] == %{
+               "id" => team.id,
+               "name" => team.name,
+               "organizationId" => organization.id
+             }
+    end
+
+    test "organizations without authentication is a stable error", %{conn: conn} do
+      {200, body} = gql(conn, "query { organizations { id } }")
+
+      assert body["data"] == nil
+      assert [%{"code" => "UNAUTHENTICATED"} | _] = body["errors"]
+    end
+
+    test "an unknown customer ID inside the caller's own team is NOT_FOUND", %{conn: conn} do
+      %{team: team, token: token} = register_actor()
+
+      query = """
+      query Customer($teamId: ID!, $id: ID!) {
+        customer(teamId: $teamId, id: $id) { id }
+      }
+      """
+
+      {200, body} =
+        gql(conn, query,
+          token: token,
+          variables: %{"teamId" => team.id, "id" => Ecto.UUID.generate()}
+        )
+
+      assert body["data"]["customer"] == nil
+      assert [%{"code" => "NOT_FOUND"} | _] = body["errors"]
+    end
+
     test "organizations and teams listings follow memberships", %{conn: conn} do
       %{organization: organization, team: team, token: token} = register_actor()
 

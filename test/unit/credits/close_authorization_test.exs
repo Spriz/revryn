@@ -40,4 +40,17 @@ defmodule BillingCore.Credits.Close.AuthorizationTest do
                :read
              )
   end
+
+  test "fails closed on malformed arguments instead of guessing" do
+    scope = %Scope{principal_type: :user, team: %{id: @team_id}, team_roles: [:finance_operator]}
+
+    # A resource without a team_id can never be team-authorized.
+    assert {:error, :unauthorized} = Authorization.authorize(scope, %{}, :write)
+
+    # Unknown actions are rejected even for a fully privileged same-team scope.
+    assert {:error, :unauthorized} = Authorization.authorize(scope, %{team_id: @team_id}, :delete)
+
+    # A non-scope principal is rejected outright.
+    assert {:error, :unauthorized} = Authorization.authorize(nil, %{team_id: @team_id}, :read)
+  end
 end

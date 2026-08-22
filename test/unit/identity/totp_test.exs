@@ -42,6 +42,43 @@ defmodule BillingCore.Identity.TotpTest do
     end
   end
 
+  describe "matching_timestep/2" do
+    test "defaults `at` to the current OS time" do
+      secret = Totp.generate_secret()
+      before = System.os_time(:second)
+      code = code_at(secret, before)
+
+      # The default-`at` head evaluates System.os_time/1 at call time; the
+      # current code must match a timestep inside the ±1-period drift window
+      # around now.
+      assert {:ok, timestep} = Totp.matching_timestep(secret, code)
+      assert_in_delta timestep, div(before, @period), 1
+    end
+
+    test "returns :error for a code outside the drift window" do
+      secret = Totp.generate_secret()
+      now = System.os_time(:second)
+
+      assert :error = Totp.matching_timestep(secret, code_at(secret, now - 3 * @period), now)
+    end
+
+    test "ignores whitespace but rejects wrong-length codes" do
+      secret = Totp.generate_secret()
+      now = System.os_time(:second)
+      code = code_at(secret, now)
+      spaced = String.slice(code, 0, 3) <> " " <> String.slice(code, 3, 3)
+
+      assert {:ok, _} = Totp.matching_timestep(secret, spaced, now)
+      assert :error = Totp.matching_timestep(secret, code <> "0", now)
+    end
+  end
+
+  describe "period/0" do
+    test "exposes the 30-second TOTP period" do
+      assert Totp.period() == 30
+    end
+  end
+
   describe "enroll_totp/1" do
     test "stores an inactive factor with the encrypted seed and returns the otpauth URI" do
       user = user_fixture()

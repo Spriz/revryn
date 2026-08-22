@@ -16,8 +16,10 @@ defmodule BillingCore.Workflows.CustomerCreditCloseWorkflowTest do
   alias BillingCore.Credits.Close, as: CloseKernel
   alias BillingCore.Credits.Close.{Approval, Evidence, Movement, TransactionMembership}
   alias BillingCore.Credits.Close.Close, as: CreditClose
-  alias BillingCore.Credits.CloseWorkflow
+  alias BillingCore.Credits.{ClosePosting, CloseWorkflow}
+  alias BillingCore.Domain.Money
   alias BillingCore.ERP.{ErpDocument, FakeERP, SyncOperation}
+  alias BillingCore.ERP.Vouchers.{AttachmentEvidence, Voucher}
 
   setup do
     fake = start_supervised!({FakeERP, []})
@@ -151,6 +153,12 @@ defmodule BillingCore.Workflows.CustomerCreditCloseWorkflowTest do
     assert closed.state == :closed
     assert %DateTime{} = closed.closed_at
     assert connection.status == "active"
+
+    # Redelivered jobs for the succeeded operation are not runnable: no
+    # second voucher, no state change.
+    assert :ok = ClosePosting.execute(sync.id)
+    assert [_only_one] = FakeERP.list_finance_vouchers(fake)
+    assert Operations.get!(operation.id).state == "succeeded"
   end
 
   test "recovers a lost voucher response without creating a duplicate", %{ctx: ctx, fake: fake} do
@@ -449,6 +457,499 @@ defmodule BillingCore.Workflows.CustomerCreditCloseWorkflowTest do
     assert {:error, :not_found} = CloseWorkflow.report(other.scope, close.id, :pdf_summary)
     assert {:error, :not_found} = CloseWorkflow.approve(other.scope, close)
     assert {:error, :not_found} = CloseWorkflow.request_posting(other.scope, close)
+  end
+
+  describe "close posting recovery" do
+    defp queued_posting!(ctx, amount) do
+      _connection = active_fake_connection(ctx.scope)
+      policy = policy_fixture(ctx.scope, ctx.team.id)
+      _grant = grant_fixture(ctx.scope, ctx.credit_account, %{amount_minor: amount})
+      {:ok, close} = CloseWorkflow.generate(ctx.scope, close_attrs(policy))
+      {:ok, approved} = CloseWorkflow.approve(ctx.scope, close)
+      {:ok, operation} = CloseWorkflow.request_posting(ctx.scope, approved)
+      sync_op = Repo.get_by!(SyncOperation, operation_id: operation.id)
+      %{close: close, operation: operation, sync_op: sync_op}
+    end
+
+    defp drain, do: Oban.drain_queue(queue: :erp, with_safety: false)
+
+    defp drain_scheduled,
+      do: Oban.drain_queue(queue: :erp, with_scheduled: true, with_safety: false)
+
+    defp expected_voucher!(close_id) do
+      close = CreditClose |> Repo.get!(close_id) |> Repo.preload([:policy_version, :movements])
+
+      {:ok, expected} =
+        CloseWorkflow.build_finance_voucher(close, close.policy_version, close.movements)
+
+      expected
+    end
+
+    defp voucher_amounts(voucher) do
+      voucher.lines
+      |> Enum.map(&{&1.account_external_id, &1.amount.minor_units})
+      |> Enum.sort()
+    end
+
+    defp attachment_evidence(content, filename) do
+      %AttachmentEvidence{
+        filename: filename,
+        content_type: "application/pdf",
+        sha256: :crypto.hash(:sha256, content) |> Base.encode16(case: :lower),
+        byte_size: byte_size(content),
+        content: content
+      }
+    end
+
+    test "an unproven lost voucher response schedules a durable retry, never a blind re-create",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation, sync_op: sync_op} = queued_posting!(ctx, 7_000)
+
+      # The create commits but the response is lost, and both the pre-create
+      # search and the recovery search claim absence.
+      :ok = FakeERP.inject_unknown_outcome(fake, :create_finance_voucher)
+      :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:ok, nil})
+      :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:ok, nil})
+
+      assert %{snoozed: 1} = drain()
+
+      assert Operations.get!(operation.id).state == "retry_scheduled"
+      sync_op = Repo.get!(SyncOperation, sync_op.id)
+      assert sync_op.state == "queued"
+      assert sync_op.response_metadata["recovery"] == "absence_proven"
+      # The close returns to posting for the retry instead of staying unknown.
+      assert Repo.get!(CreditClose, close.id).state == :posting
+
+      # The retry finds the voucher created before the response was lost.
+      assert %{success: 1} = drain_scheduled()
+
+      assert Repo.get!(CreditClose, close.id).state == :reconciled
+      assert Operations.get!(operation.id).state == "succeeded"
+      assert [voucher] = FakeERP.list_finance_vouchers(fake)
+      assert voucher_amounts(voucher) == [{"2990", -7_000}, {"5890", 7_000}]
+    end
+
+    test "a lost attachment response recovers through the attachment read-back",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation, sync_op: sync_op} = queued_posting!(ctx, 6_500)
+
+      :ok = FakeERP.inject_unknown_outcome(fake, :attach_voucher_report)
+      assert %{success: 1} = drain()
+
+      # The attach committed; the read-back proves it, so a single pass
+      # completes without a second attachment write.
+      assert Repo.get!(CreditClose, close.id).state == :reconciled
+      assert Operations.get!(operation.id).state == "succeeded"
+
+      sync_op = Repo.get!(SyncOperation, sync_op.id)
+      assert sync_op.state == "succeeded"
+
+      expected_report = CloseWorkflow.report_attachment!(close.id)
+      assert sync_op.response_metadata["attachment_sha256"] == expected_report.sha256
+
+      assert [voucher] = FakeERP.list_finance_vouchers(fake)
+
+      assert {:ok, attachment} =
+               FakeERP.get_voucher_attachment(
+                 FakeERP.connection_context(fake),
+                 {:voucher, voucher.external_voucher_number}
+               )
+
+      assert attachment.sha256 == expected_report.sha256
+      assert attachment.byte_size == expected_report.byte_size
+    end
+
+    test "a lost attachment response whose read-back also fails schedules a durable retry",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation, sync_op: sync_op} = queued_posting!(ctx, 6_100)
+
+      :ok = FakeERP.inject_unknown_outcome(fake, :attach_voucher_report)
+      # First read: nothing attached yet (triggers the attach). Second read:
+      # the recovery read-back also comes back empty.
+      :ok = FakeERP.inject_failure(fake, :get_voucher_attachment, {:ok, nil})
+      :ok = FakeERP.inject_failure(fake, :get_voucher_attachment, {:ok, nil})
+
+      assert %{snoozed: 1} = drain()
+
+      assert Operations.get!(operation.id).state == "retry_scheduled"
+      sync_op = Repo.get!(SyncOperation, sync_op.id)
+      assert sync_op.state == "queued"
+      assert sync_op.response_metadata["recovery"] == "absence_proven"
+      assert Repo.get!(CreditClose, close.id).state == :posting
+
+      # The retry finds both the voucher and the attachment already there.
+      assert %{success: 1} = drain_scheduled()
+
+      assert Repo.get!(CreditClose, close.id).state == :reconciled
+      assert Operations.get!(operation.id).state == "succeeded"
+      assert [_voucher] = FakeERP.list_finance_vouchers(fake)
+    end
+
+    test "a mismatching pre-existing attachment fails closed and is remediable",
+         %{ctx: ctx, fake: fake} do
+      _connection = active_fake_connection(ctx.scope)
+      policy = policy_fixture(ctx.scope, ctx.team.id)
+      _grant = grant_fixture(ctx.scope, ctx.credit_account, %{amount_minor: 5_500})
+      {:ok, close} = CloseWorkflow.generate(ctx.scope, close_attrs(policy))
+
+      # The voucher already exists with the right content, but carries a
+      # foreign attachment instead of the frozen close report.
+      expected = expected_voucher!(close.id)
+      erp_ctx = FakeERP.connection_context(fake)
+      {:ok, voucher} = FakeERP.create_finance_voucher(erp_ctx, expected, "pre-created-voucher")
+
+      bogus = attachment_evidence("not the close report", "bogus.pdf")
+
+      :ok =
+        FakeERP.attach_voucher_report(
+          erp_ctx,
+          {:voucher, voucher.external_voucher_number},
+          bogus,
+          "bogus-attach"
+        )
+
+      {:ok, _} = CloseWorkflow.approve(ctx.scope, close)
+      {:ok, operation} = CloseWorkflow.request_posting(ctx.scope, close)
+      assert %{success: 1} = drain()
+
+      operation = Operations.get!(operation.id)
+      assert operation.state == "failed"
+      assert operation.error_class == "validation"
+      assert operation.safe_error_code == "credit_close_reconciliation_mismatch"
+      assert operation.safe_error_summary == "attachment_hash_or_size"
+      assert Repo.get!(CreditClose, close.id).state == :mismatch
+
+      sync_op = Repo.get_by!(SyncOperation, operation_id: operation.id)
+      assert sync_op.state == "failed"
+      assert sync_op.response_metadata["mismatch"] == "attachment_hash_or_size"
+
+      assert Repo.exists?(
+               from evidence in Evidence,
+                 where:
+                   evidence.close_id == ^close.id and
+                     evidence.evidence_type == :reconciliation and
+                     fragment("?->>'status' = 'mismatch'", evidence.metadata)
+             )
+
+      assert Repo.exists?(
+               from e in BillingCore.Outbox.Event,
+                 where:
+                   e.event_type == "customer_credit_close.mismatch_detected.v1" and
+                     e.aggregate_id == ^close.id
+             )
+
+      # Remediation: a human replaces the attachment with the frozen report,
+      # then retries the same durable operation.
+      real_report = CloseWorkflow.report_attachment!(close.id)
+
+      :ok =
+        FakeERP.attach_voucher_report(
+          erp_ctx,
+          {:voucher, voucher.external_voucher_number},
+          real_report,
+          "fix-attach"
+        )
+
+      {:ok, _} = BillingCore.ERP.Sync.retry_operation(ctx.scope, operation)
+      assert %{success: 1} = drain()
+
+      assert Repo.get!(CreditClose, close.id).state == :reconciled
+      assert Operations.get!(operation.id).state == "succeeded"
+      assert [_only_one] = FakeERP.list_finance_vouchers(fake)
+    end
+
+    test "a voucher that vanishes at read-back blocks as a conflict, never a silent success",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation, sync_op: sync_op} = queued_posting!(ctx, 5_200)
+
+      :ok = FakeERP.inject_failure(fake, :get_finance_voucher, {:ok, nil})
+      assert %{success: 1} = drain()
+
+      operation = Operations.get!(operation.id)
+      assert operation.state == "blocked"
+      assert operation.error_class == "conflict"
+      assert operation.safe_error_code == "provider_not_found"
+      assert Repo.get!(SyncOperation, sync_op.id).state == "failed"
+      assert Repo.get!(CreditClose, close.id).state == :mismatch
+
+      # The voucher does exist; only the read was wrong. Remediation re-runs
+      # the same durable operation and reconciles without a second voucher.
+      assert [_voucher] = FakeERP.list_finance_vouchers(fake)
+
+      {:ok, _} = BillingCore.ERP.Sync.remediate_operation(ctx.scope, operation)
+      assert %{success: 1} = drain()
+
+      assert Repo.get!(CreditClose, close.id).state == :reconciled
+      assert Operations.get!(operation.id).state == "succeeded"
+      assert [voucher] = FakeERP.list_finance_vouchers(fake)
+      assert voucher_amounts(voucher) == [{"2990", -5_200}, {"5890", 5_200}]
+    end
+
+    test "a tampered voucher read-back is detected as a content mismatch and remediated",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation, sync_op: sync_op} = queued_posting!(ctx, 4_800)
+
+      expected = expected_voucher!(close.id)
+      [first | rest] = expected.lines
+
+      tampered = %Voucher{
+        external_voucher_number: "9999",
+        external_reference: expected.external_reference,
+        accounting_date: expected.accounting_date,
+        accounting_year_external_id: expected.accounting_year_external_id,
+        journal_external_id: expected.journal_external_id,
+        currency: expected.currency,
+        lines: [
+          %{first | amount: Money.new!(first.amount.currency, first.amount.minor_units + 1)}
+          | rest
+        ]
+      }
+
+      :ok = FakeERP.inject_failure(fake, :get_finance_voucher, {:ok, tampered})
+      assert %{success: 1} = drain()
+
+      operation = Operations.get!(operation.id)
+      assert operation.state == "failed"
+      assert operation.error_class == "validation"
+      assert operation.safe_error_summary == "voucher_content"
+      assert Repo.get!(SyncOperation, sync_op.id).state == "failed"
+      assert Repo.get!(CreditClose, close.id).state == :mismatch
+
+      # With an honest read-back the same operation reconciles the real
+      # voucher, whose amounts never changed.
+      {:ok, _} = BillingCore.ERP.Sync.retry_operation(ctx.scope, operation)
+      assert %{success: 1} = drain()
+
+      assert Repo.get!(CreditClose, close.id).state == :reconciled
+      assert [voucher] = FakeERP.list_finance_vouchers(fake)
+      assert voucher_amounts(voucher) == [{"2990", -4_800}, {"5890", 4_800}]
+    end
+
+    test "a provider error during unknown-outcome recovery parks the operation for review",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation, sync_op: sync_op} = queued_posting!(ctx, 4_400)
+
+      :ok = FakeERP.inject_unknown_outcome(fake, :create_finance_voucher)
+      :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:ok, nil})
+
+      :ok =
+        FakeERP.inject_failure(fake, :find_finance_voucher, {:error, {:authorization, :denied}})
+
+      assert %{success: 1} = drain()
+
+      # The outcome is still unknown: the operation stays reconciling and the
+      # close stays outcome_unknown — no state is claimed, no retry races the
+      # operator.
+      assert Operations.get!(operation.id).state == "reconciling"
+      assert Repo.get!(SyncOperation, sync_op.id).state == "failed"
+      assert Repo.get!(CreditClose, close.id).state == :outcome_unknown
+      assert [_voucher] = FakeERP.list_finance_vouchers(fake)
+    end
+
+    test "a provider error during attachment recovery parks the operation for review",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation, sync_op: sync_op} = queued_posting!(ctx, 4_300)
+
+      :ok = FakeERP.inject_unknown_outcome(fake, :attach_voucher_report)
+      :ok = FakeERP.inject_failure(fake, :get_voucher_attachment, {:ok, nil})
+
+      :ok =
+        FakeERP.inject_failure(
+          fake,
+          :get_voucher_attachment,
+          {:error, {:provider_failure, :io}}
+        )
+
+      assert %{success: 1} = drain()
+
+      assert Operations.get!(operation.id).state == "reconciling"
+      assert Repo.get!(SyncOperation, sync_op.id).state == "failed"
+      assert Repo.get!(CreditClose, close.id).state == :outcome_unknown
+    end
+
+    test "attachment write and read failures classify per retry policy",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation} = queued_posting!(ctx, 4_200)
+
+      # Throttled attach: scheduled retry with the provider's retry_after.
+      :ok =
+        FakeERP.inject_failure(
+          fake,
+          :attach_voucher_report,
+          {:error, {:rate_limited, %{retry_after: 1}}}
+        )
+
+      assert %{snoozed: 1} = drain()
+      refreshed = Operations.get!(operation.id)
+      assert refreshed.state == "retry_scheduled"
+      assert refreshed.error_class == "throttled"
+
+      # Transient attachment read failure: another scheduled retry.
+      :ok =
+        FakeERP.inject_failure(
+          fake,
+          :get_voucher_attachment,
+          {:error, {:provider_failure, :io}}
+        )
+
+      assert %{snoozed: 1} = drain_scheduled()
+      refreshed = Operations.get!(operation.id)
+      assert refreshed.state == "retry_scheduled"
+      assert refreshed.error_class == "transient"
+
+      # Transient voucher read-back failure: one more scheduled retry.
+      :ok =
+        FakeERP.inject_failure(
+          fake,
+          :get_finance_voucher,
+          {:error, {:provider_failure, :io}}
+        )
+
+      assert %{snoozed: 1} = drain_scheduled()
+      assert Operations.get!(operation.id).state == "retry_scheduled"
+
+      assert %{success: 1} = drain_scheduled()
+      assert Repo.get!(CreditClose, close.id).state == :reconciled
+      assert Operations.get!(operation.id).state == "succeeded"
+    end
+
+    test "voucher and attachment responses both lost in one run still converge in one pass",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation, sync_op: sync_op} = queued_posting!(ctx, 3_900)
+
+      :ok = FakeERP.inject_unknown_outcome(fake, :create_finance_voucher)
+      :ok = FakeERP.inject_unknown_outcome(fake, :attach_voucher_report)
+
+      assert %{success: 1} = drain()
+
+      # Both effects committed; both read-backs proved them. One voucher, one
+      # attachment, no duplicate writes.
+      assert Repo.get!(CreditClose, close.id).state == :reconciled
+      assert Operations.get!(operation.id).state == "succeeded"
+      assert Repo.get!(SyncOperation, sync_op.id).state == "succeeded"
+
+      assert [voucher] = FakeERP.list_finance_vouchers(fake)
+      assert voucher_amounts(voucher) == [{"2990", -3_900}, {"5890", 3_900}]
+
+      expected_report = CloseWorkflow.report_attachment!(close.id)
+
+      assert {:ok, attachment} =
+               FakeERP.get_voucher_attachment(
+                 FakeERP.connection_context(fake),
+                 {:voucher, voucher.external_voucher_number}
+               )
+
+      assert attachment.sha256 == expected_report.sha256
+    end
+
+    test "a mismatching attachment discovered during unknown recovery moves the close to mismatch",
+         %{ctx: ctx, fake: fake} do
+      %{close: close, operation: operation, sync_op: sync_op} = queued_posting!(ctx, 3_800)
+
+      bogus = attachment_evidence("someone else's report", "foreign.pdf")
+
+      :ok = FakeERP.inject_unknown_outcome(fake, :attach_voucher_report)
+      # First read: nothing attached (triggers the attach, whose response is
+      # lost). Second read: the read-back reports a foreign attachment.
+      :ok = FakeERP.inject_failure(fake, :get_voucher_attachment, {:ok, nil})
+      :ok = FakeERP.inject_failure(fake, :get_voucher_attachment, {:ok, bogus})
+
+      assert %{success: 1} = drain()
+
+      # The uncertain posting resolved into a detected mismatch — the close
+      # is parked for finance, and nothing was claimed reconciled.
+      assert Repo.get!(CreditClose, close.id).state == :mismatch
+
+      sync_op = Repo.get!(SyncOperation, sync_op.id)
+      assert sync_op.state == "failed"
+      assert sync_op.response_metadata["mismatch"] == "attachment_hash_or_size"
+
+      # The operation was mid-reconciliation, so no failure is recorded on it
+      # behind the mismatch evidence.
+      assert Operations.get!(operation.id).state == "reconciling"
+
+      assert Repo.exists?(
+               from e in BillingCore.Outbox.Event,
+                 where:
+                   e.event_type == "customer_credit_close.mismatch_detected.v1" and
+                     e.aggregate_id == ^close.id
+             )
+    end
+
+    test "provider errors are classified per policy across successive attempts",
+         %{fake: fake} do
+      # Authorization-class remediation is operator-only, so this scenario
+      # runs under a scope that also carries team_admin.
+      ctx = credit_context_fixture(roles: [:finance_operator, :team_admin])
+      %{close: close, operation: operation} = queued_posting!(ctx, 4_100)
+
+      # Unclassifiable errors fail terminally rather than retry blindly.
+      :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:error, :weird_wire_noise})
+      assert %{success: 1} = drain()
+      refreshed = Operations.get!(operation.id)
+      assert refreshed.state == "failed"
+      assert refreshed.error_class == "terminal"
+      assert refreshed.safe_error_code == "unexpected_provider_error"
+      assert Repo.get!(CreditClose, close.id).state == :mismatch
+
+      # Conflict: blocked for remediation; the close mismatch is idempotent.
+      {:ok, _} = BillingCore.ERP.Sync.retry_operation(ctx.scope, refreshed)
+      :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:error, {:conflict, %{}}})
+      assert %{success: 1} = drain()
+      refreshed = Operations.get!(operation.id)
+      assert refreshed.state == "blocked"
+      assert refreshed.error_class == "conflict"
+      assert refreshed.safe_error_code == "provider_conflict"
+      assert Repo.get!(CreditClose, close.id).state == :mismatch
+
+      # Unsupported capability: a validation failure naming the capability.
+      {:ok, _} = BillingCore.ERP.Sync.remediate_operation(ctx.scope, refreshed)
+
+      :ok =
+        FakeERP.inject_failure(
+          fake,
+          :create_finance_voucher,
+          {:error, {:unsupported_capability, :finance_vouchers}}
+        )
+
+      assert %{success: 1} = drain()
+      refreshed = Operations.get!(operation.id)
+      assert refreshed.state == "failed"
+      assert refreshed.error_class == "validation"
+      assert refreshed.safe_error_code == "unsupported_finance_vouchers"
+
+      # Authentication: blocked as an operator credentials problem.
+      {:ok, _} = BillingCore.ERP.Sync.retry_operation(ctx.scope, refreshed)
+      :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:error, {:authentication, :bad}})
+      assert %{success: 1} = drain()
+      refreshed = Operations.get!(operation.id)
+      assert refreshed.state == "blocked"
+      assert refreshed.error_class == "authorization"
+      assert refreshed.blocked_reason == "credentials_invalid"
+
+      # With credentials fixed the same durable operation reconciles.
+      {:ok, _} = BillingCore.ERP.Sync.remediate_operation(ctx.scope, refreshed)
+      assert %{success: 1} = drain()
+
+      assert Repo.get!(CreditClose, close.id).state == :reconciled
+      assert Operations.get!(operation.id).state == "succeeded"
+      assert [voucher] = FakeERP.list_finance_vouchers(fake)
+      assert voucher_amounts(voucher) == [{"2990", -4_100}, {"5890", 4_100}]
+    end
+
+    # Branches left uncovered deliberately:
+    #
+    #   * `move_to_mismatch!/1` for a close in :posted — the posted state is
+    #     only ever committed together with the reconcile/mismatch decision in
+    #     the same transaction, so a run never observes a durable :posted
+    #     close; the clause defends against half-applied historic data.
+    #   * `schedule_retry!/3`'s close branch for :posting — every {:retry}
+    #     source first passes through the unknown-outcome path, which moves
+    #     the close to :outcome_unknown before a retry can be scheduled.
+    #   * `schedule_retry!/3`'s "retry_scheduled" operation arm — claiming a
+    #     retry-scheduled operation transitions it to executing before run/2,
+    #     and every {:retry} source moves through reconciling first, so the
+    #     arm guards a state the worker cannot observe.
   end
 
   defp active_fake_connection(scope) do

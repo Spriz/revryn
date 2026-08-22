@@ -53,5 +53,21 @@ defmodule BillingCoreWeb.TeamScopeTest do
                |> log_in_user(scope.user)
                |> live("/teams/not-a-uuid")
     end
+
+    test "mounting without a team_id param halts home (defensive hook clause)" do
+      # No router path reaches the hook without `:team_id`; the clause guards
+      # against a route added under the hook without the param.
+      user = user_fixture()
+
+      socket = %Phoenix.LiveView.Socket{
+        assigns: %{__changed__: %{}, flash: %{}, current_user: user}
+      }
+
+      assert {:halt, halted} =
+               BillingCoreWeb.TeamScope.on_mount(:default, %{}, %{}, socket)
+
+      assert {:redirect, %{to: "/"}} = halted.redirected
+      assert Phoenix.Flash.get(halted.assigns.flash, :error) =~ "do not have access"
+    end
   end
 end

@@ -355,7 +355,20 @@ defmodule BillingCore.ERP.Sync do
 
   defp claim(%{state: "queued"} = op), do: {:ok, Operations.transition!(op, :claim)}
   defp claim(%{state: "retry_scheduled"} = op), do: {:ok, Operations.transition!(op, :retry)}
+  # A provider error during unknown-outcome reconciliation parks the
+  # operation in `reconciling` (the machine has no failure edge from
+  # there); the snoozed job must be able to resume the reconciliation.
+  defp claim(%{state: "reconciling"} = op), do: {:ok, op}
   defp claim(_), do: :not_runnable
+
+  # Resumption of a parked reconciliation: the operation is already in
+  # `reconciling` (a provider error interrupted the last attempt), so skip
+  # straight back to proving the outcome instead of re-issuing the write.
+  defp run_operation(type, sync_op, %{state: "reconciling"} = operation, doc, intent, connection) do
+    kind = if type == "book", do: :booked, else: :draft
+    {:ok, canonical} = Builder.build(intent, connection)
+    reconcile_unknown(sync_op, operation, doc, intent, canonical, connection, kind)
+  end
 
   defp run_operation("create_draft", sync_op, operation, doc, intent, connection) do
     adapter = ERP.adapter_for(connection)
@@ -541,9 +554,13 @@ defmodule BillingCore.ERP.Sync do
   end
 
   defp recover_unknown(sync_op, operation, doc, intent, canonical, connection, kind) do
+    operation = Operations.transition!(operation, :reconcile)
+    reconcile_unknown(sync_op, operation, doc, intent, canonical, connection, kind)
+  end
+
+  defp reconcile_unknown(sync_op, operation, doc, intent, canonical, connection, kind) do
     adapter = ERP.adapter_for(connection)
     ctx = ERP.connection_context(connection)
-    operation = Operations.transition!(operation, :reconcile)
 
     case adapter.find_document(ctx, doc.external_reference) do
       {:ok, nil} ->
@@ -560,7 +577,19 @@ defmodule BillingCore.ERP.Sync do
         reconcile_and_complete(sync_op, operation, doc, intent, canonical, external_doc, kind)
 
       {:error, error} ->
-        handle_provider_error(sync_op, operation, doc, connection, error)
+        # The outcome is STILL unknown — the machine has no failure edge
+        # out of `reconciling`, and recording a failure here would crash
+        # (record_failure!/3 accepts executing operations only). Park the
+        # operation as `reconciling`, flag auth problems, and snooze so
+        # this same job resumes the reconciliation (see claim/1).
+        {class, _opts} = classify(error)
+
+        if class == :authorization do
+          ERP.mark_action_required!(connection, "provider_auth_failure")
+        end
+
+        update_sync_op!(sync_op, "reconciling", %{"error" => inspect_error(error)})
+        {:snooze, 30}
     end
   end
 

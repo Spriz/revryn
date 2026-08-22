@@ -24,4 +24,21 @@ defmodule BillingCore.Credits.Close.LifecycleTest do
   test "does not permit posting before finance approval" do
     assert {:error, %{reason: :illegal_transition}} = Lifecycle.transition(:ready, :start_posting)
   end
+
+  test "exposes the machine definition starting at :open" do
+    machine = Lifecycle.machine()
+    assert machine.name == :customer_credit_close
+    assert machine.initial == :open
+  end
+
+  test "legal_events exposes exactly the SPEC 11.5 edges per state" do
+    assert Lifecycle.legal_events(:posting) == [:posting_succeeded, :posting_uncertain]
+    assert Lifecycle.legal_events(:outcome_unknown) == [:outcome_found, :retry_posting]
+    assert Lifecycle.legal_events(:posted) == [:detect_mismatch, :reconcile]
+    assert Lifecycle.legal_events(:ready) == [:approve, :supersede]
+
+    # Terminal states offer no way out.
+    assert Lifecycle.legal_events(:reversed) == []
+    assert Lifecycle.legal_events(:superseded) == []
+  end
 end

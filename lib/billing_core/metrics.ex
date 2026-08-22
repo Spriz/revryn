@@ -40,14 +40,17 @@ defmodule BillingCore.Metrics do
         reporter_options: [buckets: [1, 5, 10, 50, 100]]
       ),
 
-      # Oban (SPEC §22.3 oban_* family)
-      counter("oban.job.stop.duration",
-        name: "oban.jobs.completed.total",
+      # Oban (SPEC §22.3 oban_* family). The intended metric name is the
+      # first argument with event_name: pointing at the source event —
+      # telemetry_metrics silently drops a :name option, which used to ship
+      # two metrics under the same "oban.job.stop.duration" name.
+      counter("oban.jobs.completed.total",
+        event_name: [:oban, :job, :stop],
         tags: [:queue],
         tag_values: &oban_tags/1
       ),
-      counter("oban.job.exception.duration",
-        name: "oban.jobs.errored.total",
+      counter("oban.jobs.errored.total",
+        event_name: [:oban, :job, :exception],
         tags: [:queue],
         tag_values: &oban_tags/1
       ),
@@ -59,14 +62,14 @@ defmodule BillingCore.Metrics do
       ),
 
       # Durable operations (SPEC §22.9.4)
-      counter("billing_core.operation.transition.count",
-        name: "billing.operations.transitions.total",
+      counter("billing.operations.transitions.total",
+        event_name: [:billing_core, :operation, :transition],
         tags: [:type, :to_state]
       ),
 
       # Outbox
-      counter("billing_core.outbox.published.count",
-        name: "billing.outbox.published.total",
+      counter("billing.outbox.published.total",
+        event_name: [:billing_core, :outbox, :published],
         tags: [:event_type]
       ),
 

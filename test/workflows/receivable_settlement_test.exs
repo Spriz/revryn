@@ -19,7 +19,7 @@ defmodule BillingCore.Workflows.ReceivableSettlementTest do
   alias BillingCore.{Contracts, Credits, ERP, Operations, Orgs}
   alias BillingCore.Billing.Preview
   alias BillingCore.Credits.{CreditSettlement, Settlements}
-  alias BillingCore.ERP.{FakeERP, Sync}
+  alias BillingCore.ERP.{FakeERP, Sync, SyncOperation}
 
   setup do
     fake = start_supervised!({FakeERP, []})
@@ -217,6 +217,394 @@ defmodule BillingCore.Workflows.ReceivableSettlementTest do
                &(&1.external_reference == Settlements.external_reference(settlement))
              )
   end
+
+  # Books the invoice under an :erp_customer_settlement policy, leaving the
+  # settlement's durable posting job queued (not yet drained).
+  defp enqueue_erp_settlement!(scope, subscription) do
+    policy =
+      settlement_policy_fixture(scope,
+        settlement_mode: :erp_customer_settlement,
+        settlement_clearing_account_number: 5820,
+        settlement_contra_account_number: 5821
+      )
+
+    {:ok, preview} = Preview.for_subscription(scope, subscription.id, ~D[2026-08-01])
+    {:ok, intent} = Preview.freeze(scope, preview)
+    settlement = Repo.get_by!(CreditSettlement, invoice_intent_id: intent.id)
+
+    {:ok, _operation} = Sync.request_synchronization(scope, intent)
+    assert %{success: 1} = Oban.drain_queue(queue: :erp, with_safety: false)
+    {:ok, _approval} = Sync.approve_invoice(scope, intent, reason: "review")
+    {:ok, _operation} = Sync.request_booking(scope, intent)
+    assert %{success: 1} = Oban.drain_queue(queue: :erp, with_safety: false)
+
+    settlement = Repo.get!(CreditSettlement, settlement.id)
+    sync_op = Repo.get_by!(SyncOperation, operation_id: settlement.operation_id)
+    %{settlement: settlement, sync_op: sync_op, policy: policy}
+  end
+
+  defp drain_settlement, do: Oban.drain_queue(queue: :erp, with_safety: false)
+
+  defp drain_scheduled_settlement,
+    do: Oban.drain_queue(queue: :erp, with_scheduled: true, with_safety: false)
+
+  defp settlement_vouchers(fake, settlement) do
+    fake
+    |> FakeERP.list_finance_vouchers()
+    |> Enum.filter(&(&1.external_reference == Settlements.external_reference(settlement)))
+  end
+
+  defp voucher_amounts(voucher) do
+    voucher.lines
+    |> Enum.map(&{&1.account_external_id, &1.amount.minor_units})
+    |> Enum.sort()
+  end
+
+  test "a lost voucher response reconciles by reference without double-posting", %{
+    scope: scope,
+    subscription: subscription,
+    fake: fake
+  } do
+    %{settlement: settlement} = enqueue_erp_settlement!(scope, subscription)
+
+    :ok = FakeERP.inject_unknown_outcome(fake, :create_finance_voucher)
+    assert %{success: 1} = drain_settlement()
+
+    settlement = Repo.get!(CreditSettlement, settlement.id)
+    assert settlement.state == :reconciled
+
+    operation = Operations.get!(settlement.operation_id)
+    assert operation.state == "succeeded"
+
+    # Exactly one voucher exists for the settlement, with exact minor units.
+    assert [voucher] = settlement_vouchers(fake, settlement)
+    assert voucher_amounts(voucher) == [{"5820", 20_000}, {"5821", -20_000}]
+    assert settlement.external_voucher_number == voucher.external_voucher_number
+  end
+
+  test "an unproven lost response schedules a durable retry and replays idempotently", %{
+    scope: scope,
+    subscription: subscription,
+    fake: fake
+  } do
+    %{settlement: settlement, sync_op: sync_op} = enqueue_erp_settlement!(scope, subscription)
+
+    # The voucher creation commits but the response is lost, and both the
+    # pre-create search and the recovery search claim absence.
+    :ok = FakeERP.inject_unknown_outcome(fake, :create_finance_voucher)
+    :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:ok, nil})
+    :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:ok, nil})
+
+    assert %{snoozed: 1} = drain_settlement()
+
+    assert Operations.get!(settlement.operation_id).state == "retry_scheduled"
+    sync_op = Repo.get!(SyncOperation, sync_op.id)
+    assert sync_op.state == "queued"
+    assert sync_op.response_metadata["recovery"] == "absence_proven"
+    # The settlement never claims reconciliation before read-back proves it.
+    assert Repo.get!(CreditSettlement, settlement.id).state == :pending
+
+    # The retry finds the voucher created before the response was lost.
+    assert %{success: 1} = drain_scheduled_settlement()
+
+    settlement = Repo.get!(CreditSettlement, settlement.id)
+    assert settlement.state == :reconciled
+    assert Operations.get!(settlement.operation_id).state == "succeeded"
+    assert [voucher] = settlement_vouchers(fake, settlement)
+    assert voucher_amounts(voucher) == [{"5820", 20_000}, {"5821", -20_000}]
+  end
+
+  test "a conflicting voucher under the settlement reference fails closed", %{
+    scope: scope,
+    subscription: subscription,
+    fake: fake
+  } do
+    %{settlement: settlement, sync_op: sync_op, policy: policy} =
+      enqueue_erp_settlement!(scope, subscription)
+
+    # Someone (or some earlier system) parked a voucher with the settlement's
+    # stable reference but the wrong amount: 199.99 instead of 200.00.
+    accounting_date = DateTime.to_date(settlement.created_at)
+
+    {:ok, conflicting} =
+      Settlements.build_settlement_voucher(
+        %{settlement | amount_minor: 19_999},
+        policy,
+        accounting_date
+      )
+
+    ctx = FakeERP.connection_context(fake)
+    {:ok, _} = FakeERP.create_finance_voucher(ctx, conflicting, "conflicting-voucher-key")
+
+    assert %{success: 1} = drain_settlement()
+
+    # The settlement is never reconciled against mismatching amounts.
+    settlement = Repo.get!(CreditSettlement, settlement.id)
+    assert settlement.state == :pending
+    assert is_nil(settlement.external_voucher_number)
+
+    operation = Operations.get!(settlement.operation_id)
+    assert operation.state == "failed"
+    assert operation.error_class == "validation"
+    assert operation.safe_error_code == "credit_settlement_mismatch"
+    assert operation.safe_error_summary == "settlement_voucher_content"
+
+    sync_op = Repo.get!(SyncOperation, sync_op.id)
+    assert sync_op.state == "failed"
+    assert sync_op.response_metadata["mismatch"] == "settlement_voucher_content"
+
+    assert Repo.exists?(
+             from e in BillingCore.Outbox.Event,
+               where:
+                 e.event_type == "customer_credit_settlement.mismatch_detected.v1" and
+                   e.aggregate_id == ^settlement.id
+           )
+
+    # The conflicting voucher was not overwritten and no second voucher was
+    # created for the reference.
+    assert [voucher] = settlement_vouchers(fake, settlement)
+    assert voucher_amounts(voucher) == [{"5820", 19_999}, {"5821", -19_999}]
+  end
+
+  test "a transient search failure retries through policy and reconciles", %{
+    scope: scope,
+    subscription: subscription,
+    fake: fake
+  } do
+    %{settlement: settlement} = enqueue_erp_settlement!(scope, subscription)
+
+    :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:error, {:provider_failure, :io}})
+
+    assert %{snoozed: 1} = drain_settlement()
+
+    operation = Operations.get!(settlement.operation_id)
+    assert operation.state == "retry_scheduled"
+    assert operation.error_class == "transient"
+    assert Repo.get!(CreditSettlement, settlement.id).state == :pending
+
+    assert %{success: 1} = drain_scheduled_settlement()
+
+    settlement = Repo.get!(CreditSettlement, settlement.id)
+    assert settlement.state == :reconciled
+    assert [voucher] = settlement_vouchers(fake, settlement)
+    assert voucher_amounts(voucher) == [{"5820", 20_000}, {"5821", -20_000}]
+  end
+
+  test "a voucher that vanishes at read-back blocks until remediation", %{
+    scope: scope,
+    subscription: subscription,
+    fake: fake
+  } do
+    %{settlement: settlement, sync_op: sync_op} = enqueue_erp_settlement!(scope, subscription)
+
+    # The create succeeds, but the authoritative read-back claims the voucher
+    # does not exist: a provider-side conflict, never a silent success.
+    :ok = FakeERP.inject_failure(fake, :get_finance_voucher, {:ok, nil})
+
+    assert %{success: 1} = drain_settlement()
+
+    operation = Operations.get!(settlement.operation_id)
+    assert operation.state == "blocked"
+    assert operation.error_class == "conflict"
+    assert operation.safe_error_code == "provider_not_found"
+    assert Repo.get!(SyncOperation, sync_op.id).state == "failed"
+    assert Repo.get!(CreditSettlement, settlement.id).state == :pending
+
+    # The voucher does exist (only the read was wrong); remediation re-runs
+    # the same durable operation, finds it, and reconciles exactly once.
+    assert [_created] = settlement_vouchers(fake, settlement)
+
+    {:ok, _} = Sync.remediate_operation(scope, operation)
+    assert %{success: 1} = drain_settlement()
+
+    settlement = Repo.get!(CreditSettlement, settlement.id)
+    assert settlement.state == :reconciled
+    assert [voucher] = settlement_vouchers(fake, settlement)
+    assert voucher_amounts(voucher) == [{"5820", 20_000}, {"5821", -20_000}]
+  end
+
+  test "a provider validation failure dead-letters and manual retry converges", %{
+    scope: scope,
+    subscription: subscription,
+    fake: fake
+  } do
+    %{settlement: settlement, sync_op: sync_op} = enqueue_erp_settlement!(scope, subscription)
+
+    :ok =
+      FakeERP.inject_failure(
+        fake,
+        :create_finance_voucher,
+        {:error, {:validation, [%{field: :journal}]}}
+      )
+
+    assert %{success: 1} = drain_settlement()
+
+    operation = Operations.get!(settlement.operation_id)
+    assert operation.state == "failed"
+    assert operation.error_class == "validation"
+    assert operation.safe_error_code == "provider_validation"
+    assert Repo.get!(SyncOperation, sync_op.id).state == "failed"
+    assert settlement_vouchers(fake, settlement) == []
+
+    # BC-US-106: manual retry routes back into the settlement worker.
+    {:ok, _} = Sync.retry_operation(scope, operation)
+    assert %{success: 1} = drain_settlement()
+
+    settlement = Repo.get!(CreditSettlement, settlement.id)
+    assert settlement.state == :reconciled
+    assert Operations.get!(settlement.operation_id).state == "succeeded"
+    assert [voucher] = settlement_vouchers(fake, settlement)
+    assert voucher_amounts(voucher) == [{"5820", 20_000}, {"5821", -20_000}]
+  end
+
+  test "an already-reconciled settlement completes the retried operation with no provider write",
+       %{scope: scope, subscription: subscription, fake: fake} do
+    %{settlement: settlement, sync_op: sync_op} = enqueue_erp_settlement!(scope, subscription)
+
+    :ok =
+      FakeERP.inject_failure(
+        fake,
+        :create_finance_voucher,
+        {:error, {:validation, [%{field: :journal}]}}
+      )
+
+    assert %{success: 1} = drain_settlement()
+    assert Operations.get!(settlement.operation_id).state == "failed"
+
+    # During recovery an operator records that the receivable was cleared out
+    # of band (the database permits pending -> reconciled, never back).
+    Repo.get!(CreditSettlement, settlement.id)
+    |> Ecto.Changeset.change(
+      state: :reconciled,
+      external_reference: "operator-clearing-9",
+      reconciled_at: DateTime.utc_now()
+    )
+    |> Repo.update!()
+
+    {:ok, _} = Sync.retry_operation(scope, Operations.get!(settlement.operation_id))
+    assert %{success: 1} = drain_settlement()
+
+    # The retried operation observes the terminal settlement and completes
+    # without ever touching the provider again.
+    assert Operations.get!(settlement.operation_id).state == "succeeded"
+    sync_op = Repo.get!(SyncOperation, sync_op.id)
+    assert sync_op.state == "succeeded"
+    assert sync_op.response_metadata["already_reconciled"] == true
+    assert FakeERP.list_finance_vouchers(fake) == []
+  end
+
+  test "provider errors are classified per policy across successive attempts", %{
+    scope: scope,
+    subscription: subscription,
+    fake: fake
+  } do
+    %{settlement: settlement} = enqueue_erp_settlement!(scope, subscription)
+
+    # Throttled: honors retry_after and schedules a retry.
+    :ok =
+      FakeERP.inject_failure(
+        fake,
+        :find_finance_voucher,
+        {:error, {:rate_limited, %{retry_after: 1}}}
+      )
+
+    assert %{snoozed: 1} = drain_settlement()
+    operation = Operations.get!(settlement.operation_id)
+    assert operation.state == "retry_scheduled"
+    assert operation.error_class == "throttled"
+    assert operation.safe_error_code == "rate_limited"
+
+    # Authentication: blocked as an operator-remediable credentials problem.
+    :ok =
+      FakeERP.inject_failure(fake, :find_finance_voucher, {:error, {:authentication, :expired}})
+
+    assert %{success: 1} = drain_scheduled_settlement()
+    operation = Operations.get!(settlement.operation_id)
+    assert operation.state == "blocked"
+    assert operation.error_class == "authorization"
+    assert operation.blocked_reason == "credentials_invalid"
+
+    # Authorization-class remediation is operator-only; this scope carries
+    # team_admin, so remediation requeues the same durable operation.
+    {:ok, _} = Sync.remediate_operation(scope, operation)
+
+    # Provider conflicts block for remediation instead of retrying blindly.
+    :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:error, {:conflict, %{}}})
+    assert %{success: 1} = drain_settlement()
+    operation = Operations.get!(settlement.operation_id)
+    assert operation.state == "blocked"
+    assert operation.error_class == "conflict"
+    assert operation.safe_error_code == "provider_conflict"
+
+    {:ok, _} = Sync.remediate_operation(scope, operation)
+
+    # Unknown error shapes fail terminally rather than retry blindly.
+    :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:error, :weird_wire_noise})
+    assert %{success: 1} = drain_settlement()
+    operation = Operations.get!(settlement.operation_id)
+    assert operation.state == "failed"
+    assert operation.error_class == "terminal"
+    assert operation.safe_error_code == "unexpected_provider_error"
+
+    # After manual retry with a healthy provider the settlement reconciles.
+    {:ok, _} = Sync.retry_operation(scope, operation)
+    assert %{success: 1} = drain_settlement()
+
+    settlement = Repo.get!(CreditSettlement, settlement.id)
+    assert settlement.state == :reconciled
+    assert [voucher] = settlement_vouchers(fake, settlement)
+    assert voucher_amounts(voucher) == [{"5820", 20_000}, {"5821", -20_000}]
+  end
+
+  test "a provider error during unknown-outcome recovery parks, then auto-resumes", %{
+    scope: scope,
+    subscription: subscription,
+    fake: fake
+  } do
+    %{settlement: settlement, sync_op: sync_op} = enqueue_erp_settlement!(scope, subscription)
+
+    # Response lost after the create; the recovery search then fails too.
+    # The outcome is STILL unknown, so the operation parks in `reconciling`
+    # and the job snoozes — no state is claimed and no blind retry runs.
+    # (This path once marked the sync row failed with no way back: the
+    # machine has no failure edge from reconciling and manual_retry only
+    # accepts failed operations, so the money was permanently stuck.)
+    # First find: the pre-create lookup proves absence; then the create's
+    # response is lost; the recovery find then fails.
+    :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:ok, nil})
+    :ok = FakeERP.inject_unknown_outcome(fake, :create_finance_voucher)
+    :ok = FakeERP.inject_failure(fake, :find_finance_voucher, {:error, {:authorization, :denied}})
+
+    assert %{snoozed: 1} = drain_settlement()
+
+    assert Operations.get!(settlement.operation_id).state == "reconciling"
+    assert Repo.get!(SyncOperation, sync_op.id).state == "reconciling"
+    assert Repo.get!(CreditSettlement, settlement.id).state == :pending
+
+    # The voucher the lost response created is still there, exactly once.
+    assert [_voucher] = settlement_vouchers(fake, settlement)
+
+    # The provider recovers: the snoozed job resumes the reconciliation,
+    # finds that voucher, and completes — still exactly once.
+    assert %{success: 1} =
+             Oban.drain_queue(queue: :erp, with_scheduled: true, with_safety: false)
+
+    assert Operations.get!(settlement.operation_id).state == "succeeded"
+    assert Repo.get!(CreditSettlement, settlement.id).state == :reconciled
+    assert [voucher] = settlement_vouchers(fake, settlement)
+    assert voucher_amounts(voucher) == [{"5820", 20_000}, {"5821", -20_000}]
+  end
+
+  # Two SettlementPosting branches stay uncovered deliberately:
+  #
+  #   * the `{:mismatch, reason, operation}` with-else clause — no code path
+  #     produces a three-element mismatch tuple (obtain_voucher returns ok /
+  #     retry / error shapes; reconcile/2 returns two-element mismatches), so
+  #     the clause is defensive dead code;
+  #   * `schedule_retry!/2`'s `_other` operation-state arm — a retry is only
+  #     ever scheduled from the reconciling state (the unknown-outcome path
+  #     transitions to reconciling before searching), so the arm guards a
+  #     future caller, not a reachable state.
 
   test "settlements are team-scoped reads and auditors can list them", %{
     scope: scope,

@@ -230,6 +230,101 @@ defmodule BillingCore.Pricing.ModelTest do
     end
   end
 
+  describe "type/1 and per-module type/0 discriminators" do
+    test "every struct maps to its wire discriminator" do
+      {:ok, one_time} = Model.from_map(Map.put(header("one_time"), "unit_price", "1"))
+      {:ok, metered} = Model.from_map(Map.put(header("standard_metered"), "unit_rate", "1"))
+      {:ok, volume} = Model.from_map(Map.put(header("volume_tier"), "tiers", @tiers_map))
+      {:ok, graduated} = Model.from_map(Map.put(header("graduated_tier"), "tiers", @tiers_map))
+      {:ok, fixed} = Model.from_map(Map.put(header("fixed_recurring"), "unit_price", "1"))
+
+      {:ok, package} =
+        Model.from_map(
+          Map.merge(header("package"), %{"package_size" => "10", "package_price" => "1"})
+        )
+
+      {:ok, minimum} =
+        Model.from_map(
+          Map.merge(header("minimum_commit"), %{
+            "minimum_amount_minor" => 1,
+            "inner" => Map.put(header("one_time"), "unit_price", "1")
+          })
+        )
+
+      assert Model.type(one_time) == "one_time"
+      assert Model.type(metered) == "standard_metered"
+      assert Model.type(volume) == "volume_tier"
+      assert Model.type(graduated) == "graduated_tier"
+      assert Model.type(fixed) == "fixed_recurring"
+      assert Model.type(package) == "package"
+      assert Model.type(minimum) == "minimum_commit"
+
+      # The struct discriminator always equals the map's "type" header, so
+      # type/1 round-trips through to_map/1.
+      for model <- [one_time, metered, volume, graduated, fixed, package, minimum] do
+        assert Model.to_map(model)["type"] == Model.type(model)
+      end
+    end
+  end
+
+  describe "validate/1 on directly-constructed structs" do
+    test "valid structs pass through every dispatch clause" do
+      volume_tiers = [%Tier{from: D.new(0), to: nil, unit_rate: D.new(1), flat_fee_minor: 0}]
+
+      minimum = %MinimumCommit{
+        minimum_amount_minor: 100,
+        inner: %StandardMetered{unit_rate: D.new("2")}
+      }
+
+      assert {:ok, _} = Model.validate(%OneTime{unit_price: D.new("1")})
+      assert {:ok, _} = Model.validate(%StandardMetered{unit_rate: D.new("1")})
+      assert {:ok, _} = Model.validate(%VolumeTier{tiers: volume_tiers})
+      assert {:ok, ^minimum} = Model.validate(minimum)
+    end
+
+    test "a non-model term is rejected with unknown_model" do
+      assert {:error, [{:unknown_model, %{not: :a_model}}]} = Model.validate(%{not: :a_model})
+      assert {:error, [{:unknown_model, "one_time"}]} = Model.validate("one_time")
+    end
+
+    test "a struct whose money field is not a Decimal is rejected (INV-006)" do
+      assert {:error, [{:invalid_decimal, "unit_price"}]} =
+               Model.validate(%OneTime{unit_price: "1.00"})
+
+      assert {:error, [{:invalid_decimal, "unit_rate"}]} =
+               Model.validate(%StandardMetered{unit_rate: 1.0})
+    end
+
+    test "negative values are rejected on the struct too, not only in from_map" do
+      assert {:error, [{:negative, "unit_price"}]} =
+               Model.validate(%OneTime{unit_price: D.new("-1")})
+
+      assert {:error, [{:negative, "unit_rate"}]} =
+               Model.validate(%StandardMetered{unit_rate: D.new("-0.01")})
+    end
+  end
+
+  describe "from_map/1 — missing required fields" do
+    test "one_time and standard_metered without their rate field" do
+      assert {:error, [{:missing_field, "unit_price"}]} = Model.from_map(header("one_time"))
+
+      assert {:error, [{:missing_field, "unit_rate"}]} =
+               Model.from_map(header("standard_metered"))
+    end
+
+    test "volume_tier without a tiers field" do
+      assert {:error, [{:missing_field, "tiers"}]} = Model.from_map(header("volume_tier"))
+    end
+
+    test "minimum_commit without its minimum amount" do
+      map =
+        Map.put(header("minimum_commit"), "inner", Map.put(header("one_time"), "unit_price", "1"))
+
+      assert {:error, errors} = Model.from_map(map)
+      assert {:missing_field, "minimum_amount_minor"} in errors
+    end
+  end
+
   describe "Tier.contains?/2 — normative boundary rule" do
     test "exact boundary belongs to the tier whose from equals it" do
       lower = %Tier{from: D.new(0), to: D.new(100), unit_rate: D.new(1)}

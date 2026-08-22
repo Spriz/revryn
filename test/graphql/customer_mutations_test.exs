@@ -123,6 +123,16 @@ defmodule BillingCoreWeb.GraphQL.CustomerMutationsTest do
     assert replay["customer"]["currentVersion"] == 1
   end
 
+  test "an explicit null expectedVersion skips the optimistic check", ctx do
+    input = Map.put(customer_input(ctx.team), "expectedVersion", nil)
+
+    {200, %{"data" => %{"upsertCustomer" => created}}} =
+      gql(ctx.conn, @upsert, token: ctx.token, variables: %{"input" => input})
+
+    assert created["__typename"] == "UpsertCustomerSuccess"
+    assert created["customer"]["currentVersion"] == 1
+  end
+
   test "invalid input surfaces field-level problems", ctx do
     input = customer_input(ctx.team, %{"email" => "not-an-email"})
 

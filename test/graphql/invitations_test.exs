@@ -132,6 +132,112 @@ defmodule BillingCoreWeb.GraphQL.InvitationsTest do
     assert member_payload["__typename"] == "AuthorizationProblem"
   end
 
+  test "an invitation granting nothing is refused with a typed problem", %{conn: conn, ctx: ctx} do
+    {200, %{"data" => %{"inviteOrganizationMember" => payload}}} =
+      gql(conn, @invite_mutation,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "organizationId" => ctx.organization.id,
+            "email" => "granted-nothing@example.com",
+            "clientMutationId" => "invite-empty"
+          }
+        }
+      )
+
+    assert payload["__typename"] == "ValidationProblem"
+    assert payload["code"] == "NO_GRANTS"
+  end
+
+  test "the invitation listing is closed to plain organization members", %{conn: conn, ctx: ctx} do
+    member = BillingCore.IdentityFixtures.user_fixture()
+
+    BillingCore.OrgsFixtures.organization_membership_fixture(ctx.organization, member, [
+      :organization_member
+    ])
+
+    {member_token, _session} = Identity.create_session(member)
+
+    query = """
+    query Invitations($organizationId: ID!) {
+      organizationInvitations(organizationId: $organizationId) { id }
+    }
+    """
+
+    {200, body} =
+      gql(conn, query,
+        token: member_token,
+        variables: %{"organizationId" => ctx.organization.id}
+      )
+
+    assert body["data"] == nil
+    assert [%{"code" => "UNAUTHORIZED"} | _] = body["errors"]
+  end
+
+  test "revoking an invitation is single-shot; misses are typed NOT_FOUND", %{
+    conn: conn,
+    ctx: ctx
+  } do
+    {200, %{"data" => %{"inviteOrganizationMember" => invited}}} =
+      gql(conn, @invite_mutation,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "organizationId" => ctx.organization.id,
+            "email" => "revoke-me@example.com",
+            "teamId" => ctx.team.id,
+            "teamRoles" => ["auditor"],
+            "clientMutationId" => "invite-revoke"
+          }
+        }
+      )
+
+    invitation_id = invited["invitation"]["id"]
+
+    revoke = """
+    mutation Revoke($input: RevokeOrganizationInvitationInput!) {
+      revokeOrganizationInvitation(input: $input) {
+        __typename
+        ... on RevokeOrganizationInvitationSuccess { invitation { id pending } }
+        ... on ValidationProblem { code }
+      }
+    }
+    """
+
+    {200, %{"data" => %{"revokeOrganizationInvitation" => revoked}}} =
+      gql(conn, revoke,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "organizationId" => ctx.organization.id,
+            "invitationId" => invitation_id,
+            "clientMutationId" => "revoke-1"
+          }
+        }
+      )
+
+    assert revoked["__typename"] == "RevokeOrganizationInvitationSuccess"
+    assert revoked["invitation"]["pending"] == false
+
+    # Revoking again — and revoking garbage — read identically.
+    for dead_id <- [invitation_id, "not-a-uuid"] do
+      {200, %{"data" => %{"revokeOrganizationInvitation" => missed}}} =
+        gql(conn, revoke,
+          token: ctx.token,
+          variables: %{
+            "input" => %{
+              "organizationId" => ctx.organization.id,
+              "invitationId" => dead_id,
+              "clientMutationId" => "revoke-dead"
+            }
+          }
+        )
+
+      assert missed["__typename"] == "ValidationProblem"
+      assert missed["code"] == "NOT_FOUND"
+    end
+  end
+
   test "a dead token reads identically to a missing one in the browser", %{conn: conn} do
     {:ok, wanderer} = Identity.register_user("wanderer@example.com")
 

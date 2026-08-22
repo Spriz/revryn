@@ -82,6 +82,122 @@ defmodule BillingCoreWeb.OperationsLiveTest do
   test "the inbox starts empty", %{conn: conn, path: path} do
     {:ok, view, _html} = live(conn, path)
     assert has_element?(view, "#empty-inbox")
+
+    # The periodic timer re-derives the same durable state.
+    send(view.pid, :refresh)
+    assert has_element?(view, "#empty-inbox")
+  end
+
+  test "a transient provider failure shows as an automatic retry, not an action",
+       %{conn: conn, path: path, scope: scope, fake: fake, intent: intent} do
+    FakeERP.inject_failure(
+      fake,
+      :create_draft,
+      {:error, {:provider_failure, %{status: 502, detail: "blip"}}}
+    )
+
+    {:ok, operation} = Sync.request_synchronization(scope, intent)
+    Oban.drain_queue(queue: :erp, with_safety: false)
+
+    operation = Operations.get!(operation.id)
+    assert operation.state == "retry_scheduled"
+    assert operation.next_attempt_at
+
+    {:ok, view, _html} = live(conn, path)
+
+    assert has_element?(view, "#operation-#{operation.id}", "automatic retry pending")
+    assert has_element?(view, "#operation-#{operation.id}", "Next attempt")
+    # No operator affordances while the retry policy owns the recovery.
+    refute has_element?(view, "#retry-#{operation.id}")
+    refute has_element?(view, "#remediate-#{operation.id}")
+    refute has_element?(view, "#safety-#{operation.id}")
+  end
+
+  test "mid-recovery reconciliation states read as automatic", %{
+    conn: conn,
+    path: path,
+    scope: scope
+  } do
+    # `outcome_unknown` and `reconciling` are transited through by the
+    # recovery pipeline; the rows are placed there via the real state
+    # machine so the inbox labels can be asserted deterministically.
+    base = %{
+      team_id: scope.team.id,
+      organization_id: scope.organization.id,
+      actor_type: "system"
+    }
+
+    unknown =
+      base
+      |> Map.put(:type, "erp.create_draft")
+      |> Operations.create!()
+      |> Operations.transition!(:claim)
+      |> Operations.transition!(:lose_outcome)
+
+    reconciling =
+      base
+      |> Map.put(:type, "erp.book_document")
+      |> Operations.create!()
+      |> Operations.transition!(:claim)
+      |> Operations.transition!(:lose_outcome)
+      |> Operations.transition!(:reconcile)
+
+    {:ok, view, _html} = live(conn, path)
+
+    assert has_element?(view, "#operation-#{unknown.id}", "automatic reconciliation pending")
+    assert has_element?(view, "#operation-#{reconciling.id}", "reconciling — automatic")
+    refute has_element?(view, "#retry-#{unknown.id}")
+    refute has_element?(view, "#remediate-#{reconciling.id}")
+
+    # Not exercised on purpose: the `:automatic` arms inside
+    # `attention_label/1`, `retry_safety/1`, and `guidance/1` only run when
+    # attention is :action_required (state blocked/failed), and
+    # `remediation_kind/1` never returns :automatic for those states — the
+    # clauses are defensive dead arms of exhaustive case expressions.
+  end
+
+  test "a failed non-ERP operation offers the bundle but no ERP retry",
+       %{conn: conn, path: path, scope: scope} do
+    correlation = Ecto.UUID.generate()
+
+    operation =
+      Operations.create!(%{
+        team_id: scope.team.id,
+        organization_id: scope.organization.id,
+        type: "credit_close.post_voucher",
+        actor_type: "system",
+        target_type: "customer_credit_close",
+        target_id: Ecto.UUID.generate(),
+        correlation_id: correlation
+      })
+      |> Operations.transition!(:claim)
+
+    operation =
+      Operations.record_failure!(operation, :validation,
+        code: "close_validation",
+        summary: "policy account missing"
+      )
+
+    assert operation.state == "failed"
+
+    {:ok, view, _html} = live(conn, path)
+
+    assert has_element?(view, "#operation-#{operation.id}", "action required")
+    assert has_element?(view, "#operation-#{operation.id}", "customer_credit_close")
+    assert has_element?(view, "#operation-#{operation.id}", correlation)
+    assert has_element?(view, "#bundle-#{operation.id}")
+    # The ERP retry command does not apply to non-ERP operation types.
+    refute has_element?(view, "#retry-#{operation.id}")
+  end
+
+  test "retry and remediate reject unknown or foreign operation ids", %{conn: conn, path: path} do
+    {:ok, view, _html} = live(conn, path)
+
+    html = render_click(view, "retry", %{"id" => Ecto.UUID.generate()})
+    assert html =~ "Not found."
+
+    html = render_click(view, "remediate", %{"id" => "not-a-uuid"})
+    assert html =~ "Not found."
   end
 
   test "a dead-lettered ERP operation shows action required and can be retried (BC-US-106)",

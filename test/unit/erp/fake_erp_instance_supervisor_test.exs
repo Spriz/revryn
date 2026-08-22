@@ -71,6 +71,56 @@ defmodule BillingCore.ERP.FakeERP.InstanceSupervisorTest do
     assert document.external_reference == "newer-ref"
   end
 
+  test "the application owns the singleton supervisor; a second start is refused" do
+    # The default-name supervisor is started by BillingCore.Application. The
+    # Registry/DynamicSupervisor names are global, so a competing start_link
+    # must fail instead of silently splitting instance registration.
+    assert {:error, {:already_started, pid}} = InstanceSupervisor.start_link()
+    assert Process.whereis(InstanceSupervisor) == pid
+  end
+
+  test "context/1 defaults the base map and still requires a running instance" do
+    connection_id = Ecto.UUID.generate()
+    on_exit(fn -> stop_if_running(connection_id) end)
+
+    assert {:error, :not_found} = InstanceSupervisor.context(connection_id)
+
+    assert {:ok, pid} = InstanceSupervisor.ensure_started(connection_id)
+    assert {:ok, context} = InstanceSupervisor.context(connection_id)
+
+    assert context == %{
+             connection_id: connection_id,
+             provider: :fake_erp,
+             fake_server: pid
+           }
+  end
+
+  test "a start failure surfaces the reason instead of registering a broken instance" do
+    connection_id = Ecto.UUID.generate()
+
+    # FakeERP validates its startup snapshot before registering anything, so
+    # the dynamic supervisor reports the error and nothing is left behind.
+    assert {:error, {:invalid_snapshot, :malformed_snapshot}} =
+             InstanceSupervisor.ensure_started(connection_id, snapshot: %{bogus: true})
+
+    assert {:error, :not_found} = InstanceSupervisor.fetch(connection_id)
+
+    # The connection is not poisoned: a valid start still works afterwards.
+    on_exit(fn -> stop_if_running(connection_id) end)
+    assert {:ok, pid} = InstanceSupervisor.ensure_started(connection_id)
+    assert {:ok, ^pid} = InstanceSupervisor.fetch(connection_id)
+  end
+
+  # Two start_instance/2 branches stay uncovered deliberately:
+  #
+  #   * `{:error, {:already_present, _child}}` — DynamicSupervisor never
+  #     returns :already_present (that is a static Supervisor.start_child
+  #     result); the clause is defensive only.
+  #   * the `{:ok, pid}` arm of the final fetch fallback — it requires a
+  #     competing caller to win the Registry race in the window between this
+  #     caller's failed start_child and its follow-up fetch, which cannot be
+  #     scheduled deterministically from a test.
+
   defp snapshot_with_reference(reference, snapshot \\ nil) do
     server = start_supervised!({FakeERP, snapshot: snapshot}, id: {:snapshot_fake_erp, reference})
     context = FakeERP.connection_context(server)

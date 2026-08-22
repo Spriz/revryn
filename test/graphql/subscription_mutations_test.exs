@@ -121,6 +121,60 @@ defmodule BillingCoreWeb.GraphQL.SubscriptionMutationsTest do
     assert payload["code"] == "UNAUTHORIZED"
   end
 
+  test "changing or cancelling an unknown subscription is a typed NOT_FOUND", ctx do
+    change = """
+    mutation ChangeSubscription($input: ChangeSubscriptionInput!) {
+      changeSubscription(input: $input) {
+        __typename
+        ... on ValidationProblem { code }
+      }
+    }
+    """
+
+    {200, %{"data" => %{"changeSubscription" => changed}}} =
+      gql(ctx.conn, change,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "teamId" => ctx.team.id,
+            "subscriptionId" => Ecto.UUID.generate(),
+            "quantity" => "5",
+            "idempotencyKey" => "change-missing",
+            "clientMutationId" => "cm-change-missing"
+          }
+        }
+      )
+
+    assert changed["__typename"] == "ValidationProblem"
+    assert changed["code"] == "NOT_FOUND"
+
+    cancel = """
+    mutation CancelSubscription($input: CancelSubscriptionInput!) {
+      cancelSubscription(input: $input) {
+        __typename
+        ... on ValidationProblem { code }
+      }
+    }
+    """
+
+    {200, %{"data" => %{"cancelSubscription" => cancelled}}} =
+      gql(ctx.conn, cancel,
+        token: ctx.token,
+        variables: %{
+          "input" => %{
+            "teamId" => ctx.team.id,
+            "subscriptionId" => Ecto.UUID.generate(),
+            "mode" => "IMMEDIATE",
+            "idempotencyKey" => "cancel-missing",
+            "clientMutationId" => "cm-cancel-missing"
+          }
+        }
+      )
+
+    assert cancelled["__typename"] == "ValidationProblem"
+    assert cancelled["code"] == "NOT_FOUND"
+  end
+
   test "changeSubscription appends a version; cancelSubscription follows §11.1", ctx do
     input = subscription_input(ctx.team, ctx.contract, ctx.plan_version)
 

@@ -125,6 +125,108 @@ defmodule BillingCore.Workflows.ExternalBookingTest do
     assert "missing" in results
   end
 
+  test "polling refreshes a drifting draft snapshot and tolerates provider read failures",
+       %{intent: intent, fake: fake, connection: connection} do
+    doc = Repo.get_by!(ErpDocument, invoice_intent_id: intent.id)
+    hash_before = doc.last_external_hash
+
+    {:ok, edited} =
+      FakeERP.human_edit_draft(fake, doc.external_draft_number, fn draft ->
+        update_in(draft.lines, fn [line] -> [%{line | description: "edited in the ERP UI"}] end)
+      end)
+
+    :ok = perform_job(PollWorker, %{"erp_connection_id" => connection.id})
+
+    # The draft stays a draft, but the stored external hash now shows the
+    # drift an approval check would catch.
+    doc = Repo.get_by!(ErpDocument, invoice_intent_id: intent.id)
+    assert doc.state == "draft"
+    assert doc.last_external_hash == edited.external_hash
+    refute doc.last_external_hash == hash_before
+
+    # A transient provider failure leaves the document untouched for the
+    # next scheduled poll instead of guessing at external state.
+    :ok = FakeERP.inject_failure(fake, :find_document, {:error, {:provider_failure, :io}})
+    :ok = perform_job(PollWorker, %{"erp_connection_id" => connection.id})
+
+    unchanged = Repo.get_by!(ErpDocument, invoice_intent_id: intent.id)
+    assert unchanged.state == "draft"
+    assert unchanged.last_external_hash == edited.external_hash
+    assert unchanged.version == doc.version
+  end
+
+  test "an externally booked draft that no longer matches the frozen intent fails reconciliation",
+       %{intent: intent, fake: fake, connection: connection} do
+    doc = Repo.get_by!(ErpDocument, invoice_intent_id: intent.id)
+
+    # A human edits the amount and books directly in the ERP: the booked
+    # document no longer matches the frozen intent (500.00 DKK vs 499.99).
+    {:ok, _edited} =
+      FakeERP.human_edit_draft(fake, doc.external_draft_number, fn draft ->
+        update_in(draft.lines, fn [line] ->
+          [%{line | amount: BillingCore.Domain.Money.new!("DKK", 49_999)}]
+        end)
+      end)
+
+    {:ok, booked} = FakeERP.book_externally(fake, doc.external_draft_number, webhook: :drop)
+
+    :ok = perform_job(PollWorker, %{"erp_connection_id" => connection.id})
+
+    doc = Repo.get_by!(ErpDocument, invoice_intent_id: intent.id)
+    assert doc.state == "reconciliation_failed"
+    assert doc.external_booked_number == booked.external_booked_number
+    assert doc.last_external_hash == booked.external_hash
+
+    # The intent never claims erp_booked from a mismatching external state.
+    assert Billing.intent_state(intent) == "erp_draft"
+
+    assert [differences] =
+             Repo.all(
+               from r in "reconciliation_results",
+                 prefix: "billing",
+                 where: r.erp_document_id == type(^doc.id, Ecto.UUID) and r.status == "mismatch",
+                 select: r.differences
+             )
+
+    assert [%{"severity" => _, "field" => _} | _] = differences["items"]
+
+    assert Repo.exists?(
+             from e in BillingCore.Outbox.Event,
+               where:
+                 e.event_type == "erp_document.reconciliation_failed.v1" and
+                   e.aggregate_id == ^doc.id
+           )
+  end
+
+  test "a matching external booking converges even when the intent lifecycle has moved on",
+       %{scope: scope, intent: intent, fake: fake, connection: connection} do
+    {:ok, _} = Sync.approve_invoice(scope, intent, reason: "reviewed")
+    assert Billing.intent_state(intent) == "approved"
+
+    doc = Repo.get_by!(ErpDocument, invoice_intent_id: intent.id)
+    {:ok, booked} = FakeERP.book_externally(fake, doc.external_draft_number, webhook: :drop)
+
+    # The reconciled booking is recorded on the document, while the
+    # illegal :externally_booked transition from :approved is tolerated
+    # (INV-015 idempotent workers) instead of crashing the poll.
+    :ok = perform_job(PollWorker, %{"erp_connection_id" => connection.id})
+
+    doc = Repo.get_by!(ErpDocument, invoice_intent_id: intent.id)
+    assert doc.state == "booked"
+    assert doc.external_booked_number == booked.external_booked_number
+    assert Billing.intent_state(intent) == "approved"
+
+    results =
+      Repo.all(
+        from r in "reconciliation_results",
+          prefix: "billing",
+          where: r.erp_document_id == type(^doc.id, Ecto.UUID),
+          select: r.status
+      )
+
+    assert results == ["match"]
+  end
+
   defp perform_job(worker, args) do
     job = %Oban.Job{args: args}
     worker.perform(job)

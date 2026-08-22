@@ -137,7 +137,11 @@ defmodule BillingCore.ERP.Vouchers.FinanceVoucher do
 
   defp validate_balance(errors, %__MODULE__{lines: lines, currency: currency})
        when is_list(lines) do
-    amounts = for %FinanceVoucherLine{amount: %Money{} = amount} <- lines, do: amount
+    # Only same-currency amounts are summable; a foreign-currency line has
+    # already produced :currency_mismatch above and must not turn the
+    # balance check into a Money.sum! raise.
+    amounts =
+      for %FinanceVoucherLine{amount: %Money{currency: ^currency} = amount} <- lines, do: amount
 
     if length(amounts) == length(lines) and Money.sum!(amounts, currency).minor_units != 0 do
       [%{field: :lines, code: :unbalanced} | errors]

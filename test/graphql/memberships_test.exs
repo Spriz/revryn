@@ -77,6 +77,10 @@ defmodule BillingCoreWeb.GraphQL.MembershipsTest do
       assert error["code"] == "UNAUTHORIZED"
     end
 
+    # Not covered on purpose: the resolver's own `{:error, :unauthorized}`
+    # branch for teamMemberships cannot fire over HTTP — the field requires
+    # teamId, so a resolved scope is always team-scoped; outsiders are
+    # stopped earlier by scope resolution (asserted below).
     test "team directory is readable by team members and closed to outsiders", %{
       conn: conn,
       ctx: ctx,
@@ -227,6 +231,61 @@ defmodule BillingCoreWeb.GraphQL.MembershipsTest do
       assert Repo.get!(TeamMembership, membership.id).status == :removed
     end
 
+    test "membership commands against missing or malformed IDs are typed NOT_FOUND", %{
+      conn: conn,
+      ctx: ctx
+    } do
+      change = """
+      mutation Change($input: ChangeTeamRolesInput!) {
+        changeTeamRoles(input: $input) {
+          __typename
+          ... on ValidationProblem { code }
+        }
+      }
+      """
+
+      # A non-UUID never reaches the database.
+      {200, %{"data" => %{"changeTeamRoles" => malformed}}} =
+        gql(conn, change,
+          token: ctx.token,
+          variables: %{
+            "input" => %{
+              "teamId" => ctx.team.id,
+              "membershipId" => "not-a-uuid",
+              "teamRoles" => ["auditor"],
+              "clientMutationId" => "roles-x"
+            }
+          }
+        )
+
+      assert malformed["__typename"] == "ValidationProblem"
+      assert malformed["code"] == "NOT_FOUND"
+
+      remove = """
+      mutation Remove($input: RemoveTeamMemberInput!) {
+        removeTeamMember(input: $input) {
+          __typename
+          ... on ValidationProblem { code }
+        }
+      }
+      """
+
+      {200, %{"data" => %{"removeTeamMember" => missing}}} =
+        gql(conn, remove,
+          token: ctx.token,
+          variables: %{
+            "input" => %{
+              "teamId" => ctx.team.id,
+              "membershipId" => Ecto.UUID.generate(),
+              "clientMutationId" => "remove-x"
+            }
+          }
+        )
+
+      assert missing["__typename"] == "ValidationProblem"
+      assert missing["code"] == "NOT_FOUND"
+    end
+
     test "non-admin team members cannot administer memberships", %{
       conn: conn,
       ctx: ctx,
@@ -339,6 +398,36 @@ defmodule BillingCoreWeb.GraphQL.MembershipsTest do
       assert payload["team"]["id"] == ctx.team.id
       assert payload["team"]["name"] == "Nordkap Finance"
       assert payload["team"]["slug"] == ctx.team.slug
+    end
+
+    test "renameTeam with a blank name is a field-level ValidationProblem", %{
+      conn: conn,
+      ctx: ctx
+    } do
+      mutation = """
+      mutation Rename($input: RenameTeamInput!) {
+        renameTeam(input: $input) {
+          __typename
+          ... on ValidationProblem { code fields { path } }
+        }
+      }
+      """
+
+      {200, %{"data" => %{"renameTeam" => payload}}} =
+        gql(conn, mutation,
+          token: ctx.token,
+          variables: %{
+            "input" => %{
+              "teamId" => ctx.team.id,
+              "name" => "",
+              "clientMutationId" => "rename-blank"
+            }
+          }
+        )
+
+      assert payload["__typename"] == "ValidationProblem"
+      assert payload["code"] == "VALIDATION_FAILED"
+      assert Enum.any?(payload["fields"], &(&1["path"] == ["name"]))
     end
 
     @archive_mutation """

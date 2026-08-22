@@ -152,6 +152,150 @@ defmodule BillingCore.Workflows.AuthenticationTest do
       html = render_hook(view, "webauthn-unsupported", %{})
       assert html =~ "does not support passkeys"
     end
+
+    test "an invalid email is rejected before any challenge is issued", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/register")
+
+      html =
+        view
+        |> form("#registration-form", registration: %{"email" => "not-an-email", "name" => ""})
+        |> render_submit()
+
+      assert html =~ "Enter a valid email address."
+      refute_push_event(view, "webauthn-register", %{})
+    end
+
+    test "a disabled account cannot resume registration", %{conn: conn} do
+      _user = user_fixture(email: "disabled@example.com", status: :disabled)
+
+      {:ok, view, _html} = live(conn, ~p"/register")
+
+      html =
+        view
+        |> form("#registration-form",
+          registration: %{"email" => "disabled@example.com", "name" => ""}
+        )
+        |> render_submit()
+
+      assert html =~ "already exists. Sign in instead."
+      refute_push_event(view, "webauthn-register", %{})
+    end
+
+    test "a cancelled browser ceremony surfaces its message and invalidates the challenge",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/register")
+
+      view
+      |> form("#registration-form",
+        registration: %{"email" => "cancel@example.com", "name" => ""}
+      )
+      |> render_submit()
+
+      html = render_hook(view, "webauthn-error", %{"message" => "The operation was aborted."})
+      assert html =~ "The operation was aborted."
+
+      # Without a message the generic explanation is shown; the challenge
+      # was already consumed, so a late result is now rejected.
+      html = render_hook(view, "webauthn-error", %{})
+      assert html =~ "The passkey ceremony was cancelled or failed."
+
+      html = render_hook(view, "webauthn-result", registration_result(%{credential_id: "late"}))
+      assert html =~ "no longer valid"
+    end
+
+    test "a malformed authenticator response is reported, not crashed on", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/register")
+
+      view
+      |> form("#registration-form",
+        registration: %{"email" => "garbled@example.com", "name" => ""}
+      )
+      |> render_submit()
+
+      html =
+        render_hook(view, "webauthn-result", %{
+          "credentialId" => "!!!",
+          "attestationObject" => "not base64url!!",
+          "clientDataJSON" => "%%%"
+        })
+
+      assert html =~ "unreadable response"
+
+      assert Identity.list_webauthn_credentials(Identity.get_user_by_email("garbled@example.com")) ==
+               []
+    end
+
+    test "a result without transports still registers with an empty transport list",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/register")
+
+      view
+      |> form("#registration-form",
+        registration: %{"email" => "no-transports@example.com", "name" => ""}
+      )
+      |> render_submit()
+
+      result =
+        registration_result(%{credential_id: "no-transport-cred"})
+        |> Map.delete("transports")
+
+      render_hook(view, "webauthn-result", result)
+
+      user = Identity.get_user_by_email("no-transports@example.com")
+      assert [credential] = Identity.list_webauthn_credentials(user)
+      assert credential.credential_id == "no-transport-cred"
+      assert credential.transports == []
+    end
+
+    test "a passkey already registered elsewhere is refused by name", %{conn: conn} do
+      other = user_fixture(email: "owner@example.com")
+      webauthn_credential_fixture(other, credential_id: "shared-cred")
+
+      {:ok, view, _html} = live(conn, ~p"/register")
+
+      view
+      |> form("#registration-form", registration: %{"email" => "thief@example.com", "name" => ""})
+      |> render_submit()
+
+      html =
+        render_hook(view, "webauthn-result", registration_result(%{credential_id: "shared-cred"}))
+
+      assert html =~ "That passkey is already registered."
+    end
+
+    test "verifier failures map to actionable errors", %{conn: conn} do
+      # The stubbed verifier boundary injects the errors Wax would produce;
+      # the ceremony itself cannot age or misattest inside a unit test.
+      {:ok, view, _html} = live(conn, ~p"/register")
+
+      view
+      |> form("#registration-form",
+        registration: %{"email" => "expired@example.com", "name" => ""}
+      )
+      |> render_submit()
+
+      html =
+        render_hook(view, "webauthn-result", registration_result(%{error: :challenge_expired}))
+
+      assert html =~ "The registration request expired."
+
+      # A fresh challenge, then an unrecognized verifier error falls back to
+      # the generic retry message.
+      view
+      |> form("#registration-form",
+        registration: %{"email" => "expired@example.com", "name" => ""}
+      )
+      |> render_submit()
+
+      html =
+        render_hook(
+          view,
+          "webauthn-result",
+          registration_result(%{error: :unknown_attestation_format})
+        )
+
+      assert html =~ "Passkey registration failed. Try again."
+    end
   end
 
   describe "passkey sign-in (email-first)" do

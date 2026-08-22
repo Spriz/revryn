@@ -195,6 +195,192 @@ defmodule BillingCoreWeb.DemoLiveTest do
     assert has_element?(view, "#demo-close-evidence", "Closing liability")
   end
 
+  test "in-flight durable operations render as working states without an action link",
+       %{conn: conn} do
+    user = user_fixture()
+    assert {:ok, demo} = Demo.start_workspace(user)
+    on_exit(fn -> stop_if_running(demo.connection.id) end)
+
+    {:ok, refs} = Scenario.build_commercial_model(demo)
+    scope = demo.scope
+    anchor = Scenario.anchor_date(demo.workspace)
+    {:ok, preview} = Preview.for_subscription(scope, refs["subscription_id"], anchor)
+    {:ok, intent} = Preview.freeze(scope, preview)
+
+    # Draft creation requested but not yet executed: the phase is working
+    # and offers no action to click.
+    {:ok, _operation} = Sync.request_synchronization(scope, intent)
+
+    {:ok, view, _html} = live(conn |> log_in_user(user), ~p"/teams/#{demo.team.id}/demo")
+    assert has_element?(view, "#demo-phase-invoice", "Working…")
+    refute has_element?(view, "#demo-invoice-action")
+
+    # The refresh timer re-derives the same durable journey.
+    send(view.pid, :refresh_journey)
+    assert has_element?(view, "#demo-phase-invoice", "Working…")
+
+    assert %{success: 1} = Oban.drain_queue(queue: :erp, with_safety: false)
+    {:ok, _approval} = Sync.approve_invoice(scope, intent, reason: "demo review")
+
+    {:ok, view, _html} = live(conn |> log_in_user(user), ~p"/teams/#{demo.team.id}/demo")
+    assert has_element?(view, "#demo-phase-invoice", "Next step")
+    assert view |> element("#demo-invoice-action") |> render() =~ "Book the invoice"
+
+    {:ok, _operation} = Sync.request_booking(scope, intent)
+
+    {:ok, view, _html} = live(conn |> log_in_user(user), ~p"/teams/#{demo.team.id}/demo")
+    assert has_element?(view, "#demo-phase-invoice", "Working…")
+    refute has_element?(view, "#demo-invoice-action")
+
+    assert %{success: 1} = Oban.drain_queue(queue: :erp, with_safety: false)
+  end
+
+  test "each failure drill arms with its own teaching message", %{conn: conn} do
+    user = user_fixture()
+    assert {:ok, demo} = Demo.start_workspace(user)
+    on_exit(fn -> stop_if_running(demo.connection.id) end)
+
+    {:ok, refs} = Scenario.build_commercial_model(demo)
+    scope = demo.scope
+    anchor = Scenario.anchor_date(demo.workspace)
+    {:ok, preview} = Preview.for_subscription(scope, refs["subscription_id"], anchor)
+    {:ok, _intent} = Preview.freeze(scope, preview)
+
+    {:ok, view, _html} = live(conn |> log_in_user(user), ~p"/teams/#{demo.team.id}/demo")
+
+    html = view |> element("#demo-inject-failure-transient") |> render_click()
+    assert html =~ "watch the retry policy heal it automatically"
+
+    html = view |> element("#demo-inject-failure-authorization") |> render_click()
+    assert html =~ "revalidate the connection under Settings"
+
+    html = view |> element("#demo-inject-failure-terminal") |> render_click()
+    assert html =~ "hands you a support bundle"
+  end
+
+  test "commands against a vanished workspace flash instead of crashing", %{conn: conn} do
+    user = user_fixture()
+    assert {:ok, demo} = Demo.start_workspace(user)
+    on_exit(fn -> stop_if_running(demo.connection.id) end)
+
+    {:ok, view, _html} = live(conn |> log_in_user(user), ~p"/teams/#{demo.team.id}/demo")
+
+    # Credits stay locked until the invoice books, even when the event is
+    # pushed without its button.
+    html = render_click(view, "grant_credit", %{})
+    assert html =~ "The credit movement unlocks after the invoice is booked."
+
+    # The workspace is archived from elsewhere (e.g. a concurrent reset);
+    # every command lands as a flash on the still-open page.
+    Repo.get!(Workspace, demo.workspace.id)
+    |> Ecto.Changeset.change(state: :archived)
+    |> Repo.update!()
+
+    html = render_click(view, "build_commercial", %{})
+    assert html =~ "The commercial model could not be created."
+
+    html = render_click(view, "grant_credit", %{})
+    assert html =~ "The credit movement could not be recorded."
+
+    html = render_click(view, "inject_failure", %{"kind" => "validation"})
+    assert html =~ "The simulated outage could not be armed."
+
+    # The next timed refresh routes home rather than rendering stale state.
+    send(view.pid, :refresh_journey)
+    assert_redirect(view, "/")
+  end
+
+  test "the close phase renders its approved, posting, and reconciled sub-states",
+       %{conn: conn} do
+    user = user_fixture()
+    assert {:ok, demo} = Demo.start_workspace(user)
+    on_exit(fn -> stop_if_running(demo.connection.id) end)
+
+    {:ok, refs} = Scenario.build_commercial_model(demo)
+    scope = demo.scope
+    anchor = Scenario.anchor_date(demo.workspace)
+    {:ok, preview} = Preview.for_subscription(scope, refs["subscription_id"], anchor)
+    {:ok, intent} = Preview.freeze(scope, preview)
+    {:ok, _operation} = Sync.request_synchronization(scope, intent)
+    assert %{success: 1} = Oban.drain_queue(queue: :erp, with_safety: false)
+    {:ok, _approval} = Sync.approve_invoice(scope, intent, reason: "demo review")
+    {:ok, _operation} = Sync.request_booking(scope, intent)
+    assert %{success: 1} = Oban.drain_queue(queue: :erp, with_safety: false)
+    {:ok, _credit_refs} = Scenario.record_customer_credit(demo)
+
+    month_start = Date.beginning_of_month(Date.utc_today())
+
+    {:ok, policy} =
+      BillingCore.Credits.Close.create_policy(scope, %{
+        version: 1,
+        effective_from: month_start,
+        journal_number: 1,
+        liability_account_number: 2990,
+        posting_mode: :single_offset,
+        default_offset_account_number: 5890,
+        post_zero_delta: false,
+        vat_neutral: true,
+        created_by: scope.user.id
+      })
+
+    {:ok, close} =
+      BillingCore.Credits.CloseWorkflow.generate(scope, %{
+        currency: "DKK",
+        period_start: month_start,
+        period_end_exclusive: Date.add(Date.end_of_month(month_start), 1),
+        transaction_cutoff: DateTime.add(DateTime.utc_now(), 1, :second),
+        policy_version_id: policy.id,
+        bootstrap_opening_minor: 0
+      })
+
+    {:ok, _approved} = BillingCore.Credits.CloseWorkflow.approve(scope, close, reason: "review")
+
+    {:ok, view, _html} = live(conn |> log_in_user(user), ~p"/teams/#{demo.team.id}/demo")
+    assert has_element?(view, "#demo-phase-close", "Next step")
+    assert view |> element("#demo-close-action") |> render() =~ "Post the aggregate voucher"
+
+    # Requested but not yet executed: the durable posting is in flight.
+    {:ok, _operation} = BillingCore.Credits.CloseWorkflow.request_posting(scope, close)
+
+    {:ok, view, _html} = live(conn |> log_in_user(user), ~p"/teams/#{demo.team.id}/demo")
+    assert has_element?(view, "#demo-phase-close", "Working…")
+    assert view |> element("#demo-close-action") |> render() =~ "Follow the durable posting"
+
+    assert %{success: 1} = Oban.drain_queue(queue: :erp, with_safety: false)
+
+    {:ok, view, _html} = live(conn |> log_in_user(user), ~p"/teams/#{demo.team.id}/demo")
+    assert has_element?(view, "#demo-phase-close", "Next step")
+    assert view |> element("#demo-close-action") |> render() =~ "Accept and close the period"
+
+    # The generating, generation-failed, and mismatch sub-states are entered
+    # asynchronously by the close pipeline; the page derives them from the
+    # authoritative row, so the row is placed there directly.
+    substates = [
+      {:calculating, "Working…", "Follow the close as it freezes"},
+      {:failed, "Needs attention", "Inspect and retry the close calculation"},
+      {:mismatch, "Needs attention", "Investigate the reconciliation mismatch"}
+    ]
+
+    for {db_state, status, label} <- substates do
+      BillingCore.Repo.get!(BillingCore.Credits.Close.Close, close.id)
+      |> Ecto.Changeset.change(state: db_state)
+      |> BillingCore.Repo.update!()
+
+      {:ok, view, _html} = live(conn |> log_in_user(user), ~p"/teams/#{demo.team.id}/demo")
+      assert has_element?(view, "#demo-phase-close", status)
+      assert view |> element("#demo-close-action") |> render() =~ label
+    end
+
+    # Not exercised on purpose: the remaining helper fallbacks
+    # (`close_action/1` and `close_action_label/1` catch-alls,
+    # `close_body(:generating)`-adjacent :locked arms, `invoice_rank/1` and
+    # `connection_status/1` fallbacks, `commercial_status(:partial)`, and
+    # the reset-failure flash) guard states the guided workspace cannot
+    # reach through its own commands: phases render only after unlocking,
+    # provisioning always validates the connection, and the commercial
+    # build is a single atomic transaction.
+  end
+
   test "a simulated provider rejection lands safely and recovers through ordinary retry",
        %{conn: conn} do
     user = user_fixture()
