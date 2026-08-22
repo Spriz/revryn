@@ -627,7 +627,16 @@ before promotion.
   for GitHub Pages targeting engineers in SMBs/startups; documents all
   features (from `docs/features/`) and includes GraphQL API docs (from
   `schema/billing_core.graphql`). Deployed by
-  `.github/workflows/site.yml` on push to `main`.
+  `.github/workflows/site.yml` on push to `main`; live at
+  https://spriz.github.io/revryn/ (the bondev.dk redirect was removed at
+  the user's request).
+- **Repository is public (user-directed, 2026-08-22).**
+  github.com/Spriz/revryn, `main` pushed, commits now allowed (the
+  earlier stage-only convention ended when the user asked to "setup git
+  repo and push"). Remote CI fully green (run 32588941571). The Go
+  CLI/MCP companion is named `revryn` (was billingctl); release tags use
+  `cli/vX.Y.Z`. Credo is part of `mix precommit` (complexity ≤9 default,
+  nesting ≤3 — refactor, never raise thresholds, per the user).
 
 ## Latest handoff snapshot
 

@@ -1,7 +1,17 @@
 # Production-readiness review v1 — evidence matrix
 
 Status: **NO-GO** (open gates listed below)
-Date: 2026-08-22 (rev 5, same day) · Reviewed state: staged working set on `main`
+Date: 2026-08-22 (rev 6, same day) · Reviewed state: `main` pushed to
+github.com/Spriz/revryn — **remote CI fully green** (run 32588941571: all
+8 jobs — test+credo+dialyzer, Go CLI, 3 standalone showcases, fnox
+config, official image with backup/restore, release-mode Playwright with
+CLI/MCP live certification). Getting that run green surfaced and fixed
+three real production defects the local evidence had missed: invitation
+delivery crashed any release without SMTP configured (mail transport now
+degrades to link-only), generated absolute URLs hardcoded https/443
+(`PHX_URL_SCHEME`/`PHX_URL_PORT` added), and release evals inherited
+`PHX_SERVER=true` (fixture forces `server: false`). Plus two test races
+(Registry cleanup, LiveView dead-render fill).
 
 This is the BC-TASK-076 evidence matrix. Each gate lists its current
 verdict and the evidence trail. A gate is PASS only with retained,
