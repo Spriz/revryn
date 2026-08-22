@@ -138,6 +138,9 @@ jobs:
           MIX_ENV: prod
         run: |
           mix deps.get
+          # Compile before assets.deploy: the Tailwind/esbuild bundles import
+          # the colocated hooks/CSS that `mix compile` generates into _build.
+          mix compile
           mix assets.deploy
           mix release --overwrite
 
