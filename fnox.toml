@@ -1,0 +1,27 @@
+# Revryn secrets — managed with fnox (https://fnox.jdx.dev).
+#
+# Values are age-encrypted to the recipients below, so this file is safe to
+# commit; only holders of a matching age identity can decrypt. Day-to-day:
+#
+#     fnox set ECONOMIC_SANDBOX_SECRET      # prompts, encrypts, updates this file
+#     fnox exec -- mix run --no-start e2e/economic/certify.exs
+#     fnox get FNOX_SANITY                  # prints "ok" iff your identity works
+#
+# Identity resolution: `key_file` below, or the FNOX_AGE_KEY environment
+# variable (used by CI). Never commit a private key. Onboarding, rotation,
+# and the full contract live in docs/runbooks/secrets.md.
+
+[providers.age]
+type = "age"
+recipients = ["age1xwl9xlghrwar48z7945ygl42j3jm5pzfut43vwtdtvwn47etlqlqxq68uc"]
+key_file = "~/.config/fnox/revryn-age.txt"
+
+[secrets]
+# Canary: decrypts to "ok". `fnox get FNOX_SANITY` proves your identity is valid.
+FNOX_SANITY= { provider = "age", value = "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBwNUhsRTBNVUorRHdmdVFaeCt3ZlA1Y2pMRWJNcGlLcndVazNrS0djRnhZCkJ6ZUFmQk80dDE3YnFzT2R0NlVPUzB2MS91aXhLdlVENFUxWE1uVUlFOVkKLT4gUy1ncmVhc2UgXyAyUiwgJXUKNXZTakQ2QjAKLS0tIFIvY3FnQm95WnFNaDkwdm5HaVN5WmNHdHBXOW5KQkhoNElqQzk5Q2YrMUUKTB15NtvOU1R/PDayzmUl0I4hikU0x9oKZCmWFRWJrZGXCw==", description = "decryption canary; expected value: ok" }
+
+# --- Maintainer secrets only (docs/reviews/production-readiness-v1.md) ---
+# Deployment secrets (SECRET_KEY_BASE, DATABASE_URL, …) are deliberately NOT
+# catalogued here: whoever deploys Revryn owns those in their own platform's
+# secret store — see docs/runbooks/secrets.md.
+ECONOMIC_SANDBOX_SECRET = { provider = "age", description = "e-conomic sandbox credentials as app_secret_token:agreement_grant_token (SPEC §17 sandbox certification)" }

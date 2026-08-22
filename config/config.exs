@@ -7,9 +7,25 @@
 # General application configuration
 import Config
 
+# Guided mock-ERP workspaces are opt-in outside development/test. The runtime
+# override is `REVRYN_DEMO_ERP_ENABLED=true` (SPEC §34, BC-TASK-105).
+config :billing_core, :demo_erp_enabled, false
+
 config :billing_core,
   ecto_repos: [BillingCore.Repo],
   generators: [timestamp_type: :utc_datetime]
+
+# Pin the connection search_path (and unprefixed migration DDL) to public.
+# PostgreSQL's default search_path starts with "$user": once a schema named
+# after the database role exists (the official image's role is `billing`,
+# colliding with our `billing` schema), unqualified references — notably
+# Ecto's schema_migrations bookkeeping — silently resolve into that schema.
+# Readiness then reports every migration pending forever and a restart
+# would try to re-run the whole chain. Application schemas always carry
+# explicit prefixes; pinning removes the role-name dependence entirely.
+config :billing_core, BillingCore.Repo,
+  parameters: [search_path: "public"],
+  migration_default_prefix: "public"
 
 # Configure the endpoint
 
@@ -36,7 +52,10 @@ config :billing_core, Oban,
        # ERP polling fallback at least every 15 minutes (SPEC §17.12).
        {"*/15 * * * *", BillingCore.ERP.PollAllWorker},
        # Usage partition maintenance, two months ahead (SPEC §13.1).
-       {"0 3 * * *", BillingCore.Usage.PartitionWorker}
+       {"0 3 * * *", BillingCore.Usage.PartitionWorker},
+       # SPEC §20: nightly operational-retention enforcement (allowlisted
+       # machinery tables only; financial evidence is never pruned by jobs).
+       {"30 2 * * *", BillingCore.AuditExport.RetentionWorker}
      ]}
   ]
 

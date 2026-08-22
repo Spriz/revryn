@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ board.project.name }} · {{ board.name }}</h1>
+<p><a href="{% url 'project_detail' board.project.id %}">&larr; Project</a></p>
+<div class="board" id="board">
+  {% for column in columns %}
+  <section class="column" id="column-{{ column.id }}">
+    <h3>{{ column.name }}</h3>
+    {% for task in column.tasks.all %}
+    {% if not task.archived %}
+    <article class="task" id="task-{{ task.id }}">
+      <a href="{% url 'task_detail' task.id %}">{{ task.title }}</a>
+      <div class="taskmeta">
+        {% for label in task.labels.all %}<span class="chip" style="background: {{ label.color }}">{{ label.name }}</span>{% endfor %}
+        {% if task.assignee %}<span class="muted">{{ task.assignee.display_name }}</span>{% endif %}
+        {% if task.due_date %}<span class="muted">due {{ task.due_date }}</span>{% endif %}
+      </div>
+    </article>
+    {% endif %}
+    {% endfor %}
+    <form method="post" action="{% url 'create_task' column.id %}" class="newtask">{% csrf_token %}
+      <input name="title" placeholder="Add a task…" required>
+      <button>Add</button>
+    </form>
+  </section>
+  {% endfor %}
+  <form method="post" action="{% url 'create_column' board.id %}" class="column newcolumn">{% csrf_token %}
+    <input name="name" placeholder="New column" required>
+    <button id="create-column-submit">Add column</button>
+  </form>
+</div>
+{% endblock %}

@@ -23,6 +23,8 @@ defmodule BillingCore.Workflows.CustomerCreditTest do
 
   setup do
     ctx = credit_context_fixture()
+    # SPEC §9.4.1: automatic application needs a certified settlement mode.
+    settlement_policy_fixture(ctx.scope)
     Map.put(ctx, :now, DateTime.utc_now())
   end
 

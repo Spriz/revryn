@@ -71,6 +71,33 @@ type RootQueryType {
 
   "A durable operation by ID (team-scoped)."
   operation(teamId: ID!, id: ID!): Operation
+
+  "Pending and settled membership invitations of an organization (BC-US-144)."
+  organizationInvitations(organizationId: ID!): [OrganizationInvitation!]!
+
+  "Active membership directory of an organization (owners\/admins)."
+  organizationMemberships(organizationId: ID!): [OrganizationMembershipRecord!]!
+
+  "Active membership directory of a team (any team member)."
+  teamMemberships(teamId: ID!): [TeamMembershipRecord!]!
+
+  "Audit package for an invoice chain: canonical evidence files + checksum manifest (BC-US-114)."
+  auditExport(teamId: ID!, invoiceIntentId: ID!): AuditExport
+
+  "Credit accounts linked to a customer, with subledger evidence (BC-US-107)."
+  creditAccounts(teamId: ID!, customerId: ID!): [CreditAccount!]!
+
+  "One monthly customer-credit close (BC-US-163…165)."
+  creditClose(teamId: ID!, id: ID!): CreditClose
+
+  "The team's monthly customer-credit closes, newest period first (max 100)."
+  creditCloses(teamId: ID!, currency: String, state: String): [CreditClose!]!
+
+  "The team's close posting-policy versions, newest first."
+  creditClosePolicies(teamId: ID!): [CreditClosePolicy!]!
+
+  "Receivable settlements opened by credit applications (SPEC §9.4.1)."
+  creditSettlements(teamId: ID!, invoiceIntentId: ID, state: String): [CreditSettlement!]!
 }
 
 type RootMutationType {
@@ -94,6 +121,9 @@ type RootMutationType {
 
   "Maps a customer to an ERP customer number (BC-US-031)."
   mapCustomerToErp(input: MapCustomerToErpInput!): MapCustomerToErpResult!
+
+  "Maps a product to an ERP product number (BC-US-011)."
+  mapProductToErp(input: MapProductToErpInput!): MapProductToErpResult!
 
   "Creates a product with its version 1 snapshot (BC-US-010)."
   createProduct(input: CreateProductInput!): CreateProductResult!
@@ -145,7 +175,640 @@ type RootMutationType {
 
   "Manually retries a failed durable operation (finance role, §11.3)."
   retryOperation(input: RetryOperationInput!): RetryOperationResult!
+
+  "Invites an email to organization\/team memberships (BC-US-144)."
+  inviteOrganizationMember(input: InviteOrganizationMemberInput!): InviteOrganizationMemberResult!
+
+  "Revokes a pending membership invitation (BC-US-144)."
+  revokeOrganizationInvitation(input: RevokeOrganizationInvitationInput!): RevokeOrganizationInvitationResult!
+
+  "Replaces a member's organization roles; the last owner is protected (owners\/admins)."
+  changeOrganizationRoles(input: ChangeOrganizationRolesInput!): ChangeOrganizationRolesResult!
+
+  "Adds an existing organization member to a team (team admins, INV-024)."
+  addTeamMember(input: AddTeamMemberInput!): AddTeamMemberResult!
+
+  "Replaces a team member's role grants (team admins)."
+  changeTeamRoles(input: ChangeTeamRolesInput!): ChangeTeamRolesResult!
+
+  "Removes a member from a team; the history row is retained (team admins)."
+  removeTeamMember(input: RemoveTeamMemberInput!): RemoveTeamMemberResult!
+
+  "Renames a team; UUID and slug stay stable (team admins, BC-US-140)."
+  renameTeam(input: RenameTeamInput!): RenameTeamResult!
+
+  "Archives a team; the last active team is protected (owners\/admins, INV-033)."
+  archiveTeam(input: ArchiveTeamInput!): ArchiveTeamResult!
+
+  "Grants customer credit into the subledger — a liability, never a discount (BC-US-107)."
+  grantCredit(input: GrantCreditInput!): GrantCreditResult!
+
+  "Sets the versioned remaining-credit disposition policy (BC-US-109)."
+  setCreditDispositionPolicy(input: SetCreditDispositionPolicyInput!): SetCreditDispositionPolicyResult!
+
+  "Creates a monthly-close posting-policy version (BC-US-163)."
+  createCreditClosePolicy(input: CreateCreditClosePolicyInput!): CreateCreditClosePolicyResult!
+
+  "Freezes one deterministic close for a currency and calendar month (BC-US-163)."
+  generateCreditClose(input: GenerateCreditCloseInput!): GenerateCreditCloseResult!
+
+  "Approves the exact frozen report hash for ERP posting (BC-US-164)."
+  approveCreditClose(input: ApproveCreditCloseInput!): ApproveCreditCloseResult!
+
+  "Creates the durable, idempotent ERP posting operation (BC-US-164)."
+  requestCreditClosePosting(input: RequestCreditClosePostingInput!): RequestCreditClosePostingResult!
+
+  "Accepts a fully reconciled close as the authoritative period close (BC-US-165)."
+  closeCreditPeriod(input: CloseCreditPeriodInput!): CloseCreditPeriodResult!
+
+  "Freezes a compensating reversal close for an accepted close (ADR-031, BC-US-165)."
+  requestCreditCloseReversal(input: RequestCreditCloseReversalInput!): RequestCreditCloseReversalResult!
+
+  "Freezes a replacement close for a reversed period under a corrected policy (ADR-031)."
+  generateCreditCloseReplacement(input: GenerateCreditCloseReplacementInput!): GenerateCreditCloseReplacementResult!
+
+  "Records the external receivables system's settlement reference exactly once (SPEC §9.4.1)."
+  recordExternalSettlement(input: RecordExternalSettlementInput!): RecordExternalSettlementResult!
 }
+
+"An active organization membership in the admin directory."
+type OrganizationMembershipRecord {
+  id: ID!
+  userId: ID!
+  email: String
+  roles: [String!]!
+  status: String!
+  createdAt: DateTime!
+}
+
+"A team membership in the admin directory."
+type TeamMembershipRecord {
+  id: ID!
+  userId: ID!
+  email: String
+  roles: [String!]!
+  status: String!
+  createdAt: DateTime!
+}
+
+"A pending or settled membership invitation."
+type OrganizationInvitation {
+  id: ID!
+  email: String!
+  organizationRoles: [String!]!
+  teamId: ID
+  teamRoles: [String!]!
+  expiresAt: DateTime!
+  acceptedAt: DateTime
+  revokedAt: DateTime
+  pending: Boolean!
+}
+
+input InviteOrganizationMemberInput {
+  organizationId: ID!
+
+  email: String!
+
+  "organization_owner, organization_admin, or organization_member."
+  organizationRoles: [String!]
+
+  teamId: ID
+
+  "team_admin, billing_admin, finance_operator, auditor, integration_client."
+  teamRoles: [String!]
+
+  clientMutationId: String!
+}
+
+type InviteOrganizationMemberSuccess {
+  invitation: OrganizationInvitation!
+
+  "The single-use accept URL — shown once; only a hash is stored."
+  acceptUrl: String!
+
+  clientMutationId: String!
+}
+
+union InviteOrganizationMemberResult = InviteOrganizationMemberSuccess | ValidationProblem | AuthorizationProblem
+
+input RevokeOrganizationInvitationInput {
+  organizationId: ID!
+  invitationId: ID!
+  clientMutationId: String!
+}
+
+type RevokeOrganizationInvitationSuccess {
+  invitation: OrganizationInvitation!
+  clientMutationId: String!
+}
+
+union RevokeOrganizationInvitationResult = RevokeOrganizationInvitationSuccess | ValidationProblem | AuthorizationProblem
+
+input ChangeOrganizationRolesInput {
+  organizationId: ID!
+
+  membershipId: ID!
+
+  "organization_owner, organization_admin, or organization_member."
+  organizationRoles: [String!]!
+
+  clientMutationId: String!
+}
+
+type ChangeOrganizationRolesSuccess {
+  membership: OrganizationMembershipRecord!
+  clientMutationId: String!
+}
+
+union ChangeOrganizationRolesResult = ChangeOrganizationRolesSuccess | ValidationProblem | AuthorizationProblem
+
+input AddTeamMemberInput {
+  teamId: ID!
+
+  "An existing user with an active membership in the owning organization."
+  userId: ID!
+
+  "team_admin, billing_admin, finance_operator, auditor, integration_client."
+  teamRoles: [String!]!
+
+  clientMutationId: String!
+}
+
+type AddTeamMemberSuccess {
+  membership: TeamMembershipRecord!
+  clientMutationId: String!
+}
+
+union AddTeamMemberResult = AddTeamMemberSuccess | ValidationProblem | AuthorizationProblem
+
+input ChangeTeamRolesInput {
+  teamId: ID!
+
+  membershipId: ID!
+
+  "team_admin, billing_admin, finance_operator, auditor, integration_client."
+  teamRoles: [String!]!
+
+  clientMutationId: String!
+}
+
+type ChangeTeamRolesSuccess {
+  membership: TeamMembershipRecord!
+  clientMutationId: String!
+}
+
+union ChangeTeamRolesResult = ChangeTeamRolesSuccess | ValidationProblem | AuthorizationProblem
+
+input RemoveTeamMemberInput {
+  teamId: ID!
+  membershipId: ID!
+  clientMutationId: String!
+}
+
+type RemoveTeamMemberSuccess {
+  membership: TeamMembershipRecord!
+  clientMutationId: String!
+}
+
+union RemoveTeamMemberResult = RemoveTeamMemberSuccess | ValidationProblem | AuthorizationProblem
+
+input RenameTeamInput {
+  teamId: ID!
+  name: String!
+  clientMutationId: String!
+}
+
+type RenameTeamSuccess {
+  team: Team!
+  clientMutationId: String!
+}
+
+union RenameTeamResult = RenameTeamSuccess | ValidationProblem | AuthorizationProblem
+
+input ArchiveTeamInput {
+  organizationId: ID!
+
+  "The team to archive. Named so the scope stays organization-level: an owner\/admin need not be a member of the team being archived."
+  targetTeamId: ID!
+
+  clientMutationId: String!
+}
+
+type ArchiveTeamSuccess {
+  team: Team!
+  clientMutationId: String!
+}
+
+union ArchiveTeamResult = ArchiveTeamSuccess | ValidationProblem | AuthorizationProblem
+
+"One canonical evidence file with its exact bytes, base64-encoded."
+type AuditExportFile {
+  name: String!
+  contentType: String!
+  sha256: String!
+  contentBase64: String!
+}
+
+"An audit package for one invoice chain with its checksum manifest."
+type AuditExport {
+  invoiceChainId: ID!
+
+  intentCount: Int!
+
+  generatedAt: String!
+
+  "Canonical JSON manifest listing per-file SHA-256 checksums."
+  manifestJson: String!
+
+  files: [AuditExportFile!]!
+}
+
+"An accountant-approved posting policy version for monthly closes."
+type CreditClosePolicy {
+  id: ID!
+
+  version: Int!
+
+  effectiveFrom: Date!
+
+  journalNumber: Int!
+
+  liabilityAccountNumber: Int!
+
+  postingMode: String!
+
+  defaultOffsetAccountNumber: Int
+
+  postZeroDelta: Boolean!
+
+  vatNeutral: Boolean!
+
+  "SPEC §9.4.1: none, erp_customer_settlement, or external_reference."
+  settlementMode: String!
+
+  settlementClearingAccountNumber: Int
+
+  settlementContraAccountNumber: Int
+}
+
+"One receivable settlement opened by one credit application (SPEC §9.4.1)."
+type CreditSettlement {
+  id: ID!
+  invoiceIntentId: ID!
+  creditAccountId: ID!
+  currency: String!
+  amountMinor: Int!
+  mode: String!
+  state: String!
+  externalReference: String
+  externalVoucherNumber: String
+  reconciledAt: DateTime
+  createdAt: DateTime!
+}
+
+"Movement-type roll-up inside one close period."
+type CreditCloseMovement {
+  movementType: String!
+  amountMinor: MoneyMinorUnits!
+  liabilityEffectMinor: MoneyMinorUnits!
+  transactionCount: Int!
+}
+
+"Metadata of one immutable evidence file (never inline bytes)."
+type CreditCloseEvidenceMeta {
+  evidenceType: String!
+  sha256: String!
+  contentType: String!
+  byteSize: Int!
+}
+
+"One immutable evidence file with its exact bytes, base64-encoded."
+type CreditCloseReport {
+  evidenceType: String!
+  sha256: String!
+  contentType: String!
+  contentBase64: String!
+}
+
+"One monthly customer-credit close (§11.5 lifecycle)."
+type CreditClose {
+  id: ID!
+
+  currency: String!
+
+  periodStart: Date!
+
+  periodEndExclusive: Date!
+
+  transactionCutoff: DateTime!
+
+  "regular, reversal, or replacement (ADR-031 compensating closes)."
+  closeKind: String!
+
+  "For a correction close: the close it corrects."
+  reversalOfCloseId: ID
+
+  "Correction closes referencing this close, oldest first."
+  corrections: [CreditClose!]!
+
+  "Current §11.5 state (open, ready, approved, posting, reconciled, closed, ...)."
+  state: String!
+
+  openingMinor: MoneyMinorUnits
+
+  closingMinor: MoneyMinorUnits
+
+  netChangeMinor: MoneyMinorUnits
+
+  economicLiabilityLineMinor: MoneyMinorUnits
+
+  ledgerTransactionCount: Int
+
+  reportSha256: String
+
+  closedAt: DateTime
+
+  movements: [CreditCloseMovement!]!
+
+  evidence: [CreditCloseEvidenceMeta!]!
+
+  "Voucher number of the posted aggregate document, once posted."
+  externalVoucherNumber: String
+
+  "One stored immutable evidence file with its exact bytes."
+  report(evidenceType: String!): CreditCloseReport
+}
+
+input CreateCreditClosePolicyInput {
+  teamId: ID!
+
+  effectiveFrom: Date!
+
+  journalNumber: Int!
+
+  liabilityAccountNumber: Int!
+
+  defaultOffsetAccountNumber: Int!
+
+  postZeroDelta: Boolean
+
+  vatNeutral: Boolean
+
+  "none (default — blocks automatic credit application), erp_customer_settlement, or external_reference."
+  settlementMode: String
+
+  settlementClearingAccountNumber: Int
+
+  settlementContraAccountNumber: Int
+
+  clientMutationId: String!
+}
+
+type CreateCreditClosePolicySuccess {
+  policy: CreditClosePolicy!
+  clientMutationId: String!
+}
+
+union CreateCreditClosePolicyResult = CreateCreditClosePolicySuccess | ValidationProblem | AuthorizationProblem
+
+input GenerateCreditCloseInput {
+  teamId: ID!
+
+  currency: String!
+
+  "Any date inside the close month; the calendar month is frozen."
+  periodDate: Date!
+
+  "Required only for the very first close of a currency (zero is valid)."
+  bootstrapOpeningMinor: MoneyMinorUnits
+
+  "Defaults to the latest policy version."
+  policyVersionId: ID
+
+  idempotencyKey: String!
+
+  clientMutationId: String!
+}
+
+type GenerateCreditCloseSuccess {
+  creditClose: CreditClose!
+  clientMutationId: String!
+}
+
+union GenerateCreditCloseResult = GenerateCreditCloseSuccess | ValidationProblem | AuthorizationProblem | IdempotencyConflict
+
+input ApproveCreditCloseInput {
+  teamId: ID!
+  creditCloseId: ID!
+  reason: String
+  clientMutationId: String!
+}
+
+type ApproveCreditCloseSuccess {
+  creditClose: CreditClose!
+  clientMutationId: String!
+}
+
+union ApproveCreditCloseResult = ApproveCreditCloseSuccess | ValidationProblem | AuthorizationProblem
+
+input RequestCreditClosePostingInput {
+  teamId: ID!
+  creditCloseId: ID!
+  idempotencyKey: String!
+  clientMutationId: String!
+}
+
+type RequestCreditClosePostingSuccess {
+  operation: Operation!
+  creditClose: CreditClose!
+  clientMutationId: String!
+}
+
+union RequestCreditClosePostingResult = RequestCreditClosePostingSuccess | ValidationProblem | AuthorizationProblem | IdempotencyConflict
+
+input RequestCreditCloseReversalInput {
+  teamId: ID!
+
+  creditCloseId: ID!
+
+  "Recorded correction reason — required for the audit trail."
+  reason: String!
+
+  clientMutationId: String!
+}
+
+type RequestCreditCloseReversalSuccess {
+  "The frozen reversal close carrying the mirrored bridge."
+  reversalClose: CreditClose!
+
+  clientMutationId: String!
+}
+
+union RequestCreditCloseReversalResult = RequestCreditCloseReversalSuccess | ValidationProblem | AuthorizationProblem
+
+input GenerateCreditCloseReplacementInput {
+  teamId: ID!
+
+  "The reversed close whose period is being reposted."
+  creditCloseId: ID!
+
+  "The corrected posting-policy version."
+  policyVersionId: ID!
+
+  "Recorded correction reason — required for the audit trail."
+  reason: String!
+
+  clientMutationId: String!
+}
+
+type GenerateCreditCloseReplacementSuccess {
+  replacementClose: CreditClose!
+  clientMutationId: String!
+}
+
+union GenerateCreditCloseReplacementResult = GenerateCreditCloseReplacementSuccess | ValidationProblem | AuthorizationProblem
+
+input CloseCreditPeriodInput {
+  teamId: ID!
+  creditCloseId: ID!
+  clientMutationId: String!
+}
+
+type CloseCreditPeriodSuccess {
+  creditClose: CreditClose!
+  clientMutationId: String!
+}
+
+union CloseCreditPeriodResult = CloseCreditPeriodSuccess | ValidationProblem | AuthorizationProblem
+
+input RecordExternalSettlementInput {
+  teamId: ID!
+
+  settlementId: ID!
+
+  "The authoritative external receivables system's settlement reference."
+  externalReference: String!
+
+  clientMutationId: String!
+}
+
+type RecordExternalSettlementSuccess {
+  settlement: CreditSettlement!
+  clientMutationId: String!
+}
+
+union RecordExternalSettlementResult = RecordExternalSettlementSuccess | ValidationProblem | AuthorizationProblem
+
+"A credit grant — an individual liability movement, never a discount."
+type CreditGrant {
+  id: ID!
+  originType: String!
+  originId: ID
+  originInvoiceLineId: ID
+  grantedMinor: MoneyMinorUnits!
+  remainingMinor: MoneyMinorUnits!
+  reservedMinor: MoneyMinorUnits!
+  currency: String!
+  status: String!
+  grantedAt: DateTime!
+  expiresAt: DateTime
+}
+
+"One append-only subledger transaction."
+type CreditTransaction {
+  id: ID!
+  transactionType: String!
+  amountMinor: MoneyMinorUnits!
+  currency: String!
+  grantId: ID
+  invoiceIntentId: ID
+  operationId: ID
+  reasonCode: String
+  accountingEffectiveOn: Date!
+  occurredAt: DateTime!
+}
+
+"A versioned remaining-credit disposition policy (BC-US-109)."
+type CreditDispositionPolicy {
+  version: Int!
+
+  "retain, refund, or expire_after."
+  policy: String!
+
+  expireAfterDays: Int
+
+  effectiveFrom: DateTime!
+}
+
+"A team-scoped credit account projection over the append-only ledger."
+type CreditAccount {
+  id: ID!
+
+  "The organization-level commercial account this projects."
+  accountId: ID!
+
+  currency: String!
+
+  availableMinor: MoneyMinorUnits!
+
+  reservedMinor: MoneyMinorUnits!
+
+  grants: [CreditGrant!]!
+
+  transactions: [CreditTransaction!]!
+
+  "The currently effective disposition policy, or null when unset."
+  dispositionPolicy: CreditDispositionPolicy
+}
+
+input GrantCreditInput {
+  teamId: ID!
+
+  creditAccountId: ID!
+
+  "unused_prepaid_service, goodwill, external_correction, or manual."
+  originType: String!
+
+  amountMinor: MoneyMinorUnits!
+
+  currency: String!
+
+  reasonCode: String
+
+  expiresAt: DateTime
+
+  idempotencyKey: String!
+
+  clientMutationId: String!
+}
+
+type GrantCreditSuccess {
+  creditGrant: CreditGrant!
+  clientMutationId: String!
+}
+
+union GrantCreditResult = GrantCreditSuccess | ValidationProblem | AuthorizationProblem | IdempotencyConflict
+
+input SetCreditDispositionPolicyInput {
+  teamId: ID!
+
+  creditAccountId: ID!
+
+  "retain, refund, or expire_after."
+  policy: String!
+
+  "Required for expire_after."
+  expireAfterDays: Int
+
+  clientMutationId: String!
+}
+
+type SetCreditDispositionPolicySuccess {
+  dispositionPolicy: CreditDispositionPolicy!
+  clientMutationId: String!
+}
+
+union SetCreditDispositionPolicyResult = SetCreditDispositionPolicySuccess | ValidationProblem | AuthorizationProblem
 
 "Result of one ingested usage event."
 type UsageIngestOutcome {
@@ -697,6 +1360,29 @@ type PublishPlanVersionSuccess {
 }
 
 union PublishPlanVersionResult = PublishPlanVersionSuccess | ValidationProblem | AuthorizationProblem
+
+type ProductErpMapping {
+  id: ID!
+  productId: ID!
+  erpConnectionId: ID!
+  externalProductNumber: String!
+  validationStatus: String!
+}
+
+input MapProductToErpInput {
+  teamId: ID!
+  productId: ID!
+  erpConnectionId: ID!
+  externalProductNumber: String!
+  clientMutationId: String!
+}
+
+type MapProductToErpSuccess {
+  mapping: ProductErpMapping!
+  clientMutationId: String!
+}
+
+union MapProductToErpResult = MapProductToErpSuccess | ValidationProblem | AuthorizationProblem
 
 type Customer {
   id: ID!

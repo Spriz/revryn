@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ organization.name }} · Members</h1>
+<p><a href="{% url 'organization_home' organization.slug %}">&larr; Back to projects</a></p>
+<table class="table" id="members-table">
+  <thead><tr><th>Member</th><th>Role</th><th></th></tr></thead>
+  <tbody>
+  {% for membership in memberships %}
+    <tr id="member-{{ membership.id }}">
+      <td>{{ membership.user.display_name }} <span class="muted">{{ membership.user.email }}</span></td>
+      <td>
+        {% if my_membership.is_admin %}
+        <form method="post" action="{% url 'change_role' organization.slug membership.id %}" class="inline">{% csrf_token %}
+          <select name="role" onchange="this.form.submit()">
+            {% for value, label in roles %}<option value="{{ value }}" {% if membership.role == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select>
+        </form>
+        {% else %}{{ membership.get_role_display }}{% endif %}
+      </td>
+      <td>
+        {% if my_membership.is_admin and membership.id != my_membership.id %}
+        <form method="post" action="{% url 'remove_member' organization.slug membership.id %}" class="inline">{% csrf_token %}
+          <button class="danger">Remove</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% if my_membership.is_admin %}
+<h2>Invite</h2>
+<form method="post" action="{% url 'invite' organization.slug %}" id="invite-form" class="card">{% csrf_token %}
+  <label>Email <input type="email" name="email" required></label>
+  <label>Role
+    <select name="role">{% for value, label in roles %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select>
+  </label>
+  <button id="invite-submit">Create invitation link</button>
+</form>
+
+<h2>Invitations</h2>
+<table class="table" id="invitations-table">
+  <tbody>
+  {% for invitation in invitations %}
+    <tr>
+      <td>{{ invitation.email }} · {{ invitation.role }}</td>
+      <td>{% if invitation.accepted_at %}accepted{% elif invitation.revoked_at %}revoked{% else %}pending{% endif %}</td>
+      <td>{% if invitation.is_pending %}
+        <form method="post" action="{% url 'revoke_invitation' organization.slug invitation.id %}" class="inline">{% csrf_token %}<button class="danger">Revoke</button></form>
+      {% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,59 @@
+<h1><%= @current_organization.name %> · Billing</h1>
+<p class="muted">Standalone showcase fixtures — served through the application-local billing seam.</p>
+<div class="grid2">
+<section class="card" id="plan-card">
+  <h2>Plan</h2>
+  <p>Interval: <strong id="billing-interval"><%= @summary.interval %></strong>
+     <% if @summary.interval == "annual" %><span class="muted">(12 months, charged as <%= BillingSeam::ANNUAL_MONTHS_CHARGED %>)</span><% end %></p>
+  <p>Base plan: <strong id="base-total"><%= BillingSeam.format_ore(@summary.base_ore) %></strong></p>
+  <p>Automation add-on: <strong id="addon-total"><%= BillingSeam.format_ore(@summary.addon_ore) %></strong></p>
+  <% if current_membership.admin? %>
+    <%= form_with url: organization_billing_path(@current_organization.slug), method: :patch, html: { id: "billing-settings-form" } do %>
+      <label>Interval
+        <select name="billing_interval">
+          <option value="monthly" <%= "selected" if @summary.interval == "monthly" %>>monthly</option>
+          <option value="annual" <%= "selected" if @summary.interval == "annual" %>>annual (prepaid)</option>
+        </select>
+      </label>
+      <label><input type="checkbox" name="automation_addon" value="1" <%= "checked" if @current_organization.automation_addon %>> Automation add-on</label>
+      <label>Seat decrease timing
+        <select name="seat_decrease_timing">
+          <option value="period_end" <%= "selected" if @current_organization.seat_decrease_timing == "period_end" %>>at period end</option>
+          <option value="immediate" <%= "selected" if @current_organization.seat_decrease_timing == "immediate" %>>immediately</option>
+        </select>
+      </label>
+      <button id="billing-save">Save</button>
+    <% end %>
+  <% end %>
+</section>
+<section class="card" id="seats-card">
+  <h2>Seats</h2>
+  <p><strong id="active-seats"><%= @summary.active_seats %></strong> active ·
+     billable <strong id="billable-seats"><%= @summary.billable_seats %></strong>
+     <span class="muted">(increases bill immediately; decreases follow the configured timing)</span></p>
+  <p>Seat total: <strong id="seats-total"><%= BillingSeam.format_ore(@summary.seats_ore) %></strong></p>
+  <% if current_membership.admin? && @current_organization.seat_decrease_timing == "period_end" %>
+    <%= form_with url: rollover_organization_billing_path(@current_organization.slug), method: :post do %>
+      <button id="rollover-period">Start new billing period</button>
+    <% end %>
+  <% end %>
+</section>
+</div>
+<p class="big">Period total: <strong id="period-total"><%= BillingSeam.format_ore(@summary.period_total_ore) %></strong></p>
+
+<% if @summary.respond_to?(:preview_lines) %>
+  <section class="card" id="preview-traceability">
+    <h2>Billing Core invoice preview</h2>
+    <p class="muted">Live from the platform — fingerprint
+       <code id="preview-fingerprint"><%= @summary.preview_fingerprint %></code></p>
+    <table class="table" id="preview-lines">
+      <thead><tr><th>Line</th><th>Description</th><th>Qty</th><th>Amount (minor)</th></tr></thead>
+      <tbody>
+        <% @summary.preview_lines.each do |line| %>
+          <tr><td class="muted"><%= line["lineKey"] %></td><td><%= line["description"] %></td>
+              <td><%= line["quantity"] %></td><td><%= line["amountMinor"] %></td></tr>
+        <% end %>
+      </tbody>
+    </table>
+  </section>
+<% end %>

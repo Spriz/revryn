@@ -1,0 +1,17 @@
+<h1 id="contact-name"><%= @contact.full_name %></h1>
+<p class="muted"><%= @contact.title %> · <%= @contact.email %> · <%= @contact.phone %>
+   <% if @contact.company %> · <a href="<%= organization_company_path(@current_organization.slug, @contact.company_id) %>"><%= @contact.company.name %></a><% end %></p>
+<section class="card">
+  <h2>Notes</h2>
+  <ul id="note-list">
+    <% @notes.each do |note| %>
+      <li><strong><%= note.author.display_name %></strong> <%= note.body %></li>
+    <% end %>
+  </ul>
+  <%= form_with url: organization_notes_path(@current_organization.slug), method: :post, html: { id: "note-form" } do %>
+    <input type="hidden" name="notable_type" value="Contact">
+    <input type="hidden" name="notable_id" value="<%= @contact.id %>">
+    <textarea name="body" required placeholder="Add a note…"></textarea>
+    <button id="note-submit">Add note</button>
+  <% end %>
+</section>

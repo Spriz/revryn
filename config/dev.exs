@@ -1,5 +1,7 @@
 import Config
 
+config :billing_core, :demo_erp_enabled, true
+
 # Configure your database
 config :billing_core, BillingCore.Repo,
   username: "postgres",

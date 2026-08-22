@@ -1,0 +1,109 @@
+name: Release revryn
+
+# BC-US-157 release artifacts: Linux amd64/arm64, macOS amd64/arm64,
+# Windows amd64 binaries plus checksums, keyless signatures, and SBOMs.
+# Tag `cli/vX.Y.Z` to release; workflow_dispatch builds unsigned
+# dry-run artifacts for verification.
+
+on:
+  push:
+    tags: ["cli/v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write # cosign keyless signing via GitHub OIDC
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/revryn
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: clients/revryn/go.mod
+
+      - name: Test before building artifacts
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/cli/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/cli/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the matrix
+        env:
+          CGO_ENABLED: "0"
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            GOOS="${target%/*}" GOARCH="${target#*/}"
+            ext=""; [ "$GOOS" = "windows" ] && ext=".exe"
+            out="dist/revryn_${VERSION}_${GOOS}_${GOARCH}${ext}"
+            GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
+              -ldflags "-s -w -X github.com/revryn/billing-core/clients/revryn/internal/commands.Version=${VERSION}" \
+              -o "$out" ./cmd/revryn
+          done
+          (cd dist && sha256sum revryn_* > SHA256SUMS)
+
+      - name: SBOM (SPDX) per artifact source
+        uses: anchore/sbom-action@v0
+        with:
+          path: clients/revryn
+          format: spdx-json
+          output-file: clients/revryn/dist/revryn-${{ steps.version.outputs.version }}.sbom.spdx.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksums and SBOM (keyless, GitHub OIDC)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob --yes \
+            --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+          cosign sign-blob --yes \
+            --bundle "dist/revryn-${{ steps.version.outputs.version }}.sbom.spdx.json.sigstore.json" \
+            "dist/revryn-${{ steps.version.outputs.version }}.sbom.spdx.json"
+
+      - name: Verification instructions
+        run: |
+          cat > dist/VERIFY.md <<'EOF'
+          # Verifying a revryn release
+
+          1. `sha256sum -c SHA256SUMS --ignore-missing` next to your binary.
+          2. Signature (keyless, Sigstore):
+
+                 cosign verify-blob \
+                   --bundle SHA256SUMS.sigstore.json \
+                   --certificate-identity-regexp 'github.com/.+/.+/\.github/workflows/release-revryn\.yml@.+' \
+                   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                   SHA256SUMS
+
+          3. The SBOM (`*.sbom.spdx.json`) is signed the same way.
+          EOF
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/cli/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: clients/revryn/dist/*
+
+      - name: Upload dry-run artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/cli/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: revryn-dryrun
+          path: clients/revryn/dist/*

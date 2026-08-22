@@ -56,12 +56,15 @@ defmodule BillingCoreWeb.Router do
     live_session :authenticated,
       on_mount: [{BillingCoreWeb.UserAuth, :ensure_authenticated}] do
       live "/", DashboardLive, :index
+      live "/start", FirstRunLive, :index
       live "/security", AuthLive.Security, :index
+      live "/invitations/:token", Features.Organization.AcceptInvitationLive, :accept
 
       # Team-scoped product UI (BC-US-120). Each of these LiveViews declares
       # the BillingCoreWeb.TeamScope on_mount hook, which resolves the
       # authorization scope from :team_id (SPEC §13.4).
       live "/teams/:team_id", TeamLive.Overview, :show
+      live "/teams/:team_id/demo", DemoLive.Show, :show
       live "/teams/:team_id/customers", CustomerLive.Index, :index
       live "/teams/:team_id/customers/:id", CustomerLive.Show, :show
       live "/teams/:team_id/catalog", CatalogLive.Index, :index
@@ -70,10 +73,24 @@ defmodule BillingCoreWeb.Router do
       live "/teams/:team_id/subscriptions/:id", SubscriptionLive.Show, :show
       live "/teams/:team_id/billing-runs", BillingRunLive.Index, :index
       live "/teams/:team_id/billing-runs/:id", BillingRunLive.Show, :show
+      live "/teams/:team_id/credit-closes", CreditCloses.IndexLive, :index
+      live "/teams/:team_id/credit-closes/:id", CreditCloses.ShowLive, :show
       live "/teams/:team_id/invoices/:intent_id", IntentLive, :show
       live "/teams/:team_id/operations", OperationsLive, :index
       live "/teams/:team_id/settings", SettingsLive, :index
+      live "/teams/:team_id/members", Features.Organization.MembersLive, :index
     end
+  end
+
+  # Browser file download for immutable close evidence — same scope
+  # resolution and domain command as the LiveView surface (not an API;
+  # INV-017 keeps application resources GraphQL-only).
+  scope "/", BillingCoreWeb do
+    pipe_through [:browser, :require_authenticated_user]
+
+    get "/teams/:team_id/credit-closes/:id/report/:evidence_type",
+        CreditCloses.ReportController,
+        :download
   end
 
   # Operational dashboard for platform administrators — available in every

@@ -1,0 +1,31 @@
+{
+  "data": {
+    "edges": [
+      {
+        "cursor": "c1",
+        "node": {
+          "id": "cu-1",
+          "externalId": "crm-1001",
+          "status": "active",
+          "currentVersion": 2,
+          "legalName": "Nordisk Regnskab ApS"
+        }
+      },
+      {
+        "cursor": "c2",
+        "node": {
+          "id": "cu-2",
+          "externalId": "crm-1002",
+          "status": "active",
+          "currentVersion": 1
+        }
+      }
+    ],
+    "pageInfo": {
+      "hasNextPage": true,
+      "endCursor": "c2"
+    }
+  },
+  "correlationId": "corr-fixed",
+  "schema": "revryn.v1"
+}

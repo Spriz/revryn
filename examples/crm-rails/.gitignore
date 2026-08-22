@@ -1,0 +1,11 @@
+log/*
+tmp/*
+!log/.keep
+!tmp/.keep
+storage/*
+db/*.sqlite3
+db/*.sqlite3-*
+.env*
+e2e/node_modules/
+e2e/test-results/
+e2e/playwright-report/

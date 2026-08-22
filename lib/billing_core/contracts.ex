@@ -770,6 +770,14 @@ defmodule BillingCore.Contracts do
               }
             )
 
+            # BC-US-109: an immediate cancellation durably triggers the
+            # remaining-credit disposition evaluation for the customer.
+            if next_status == :cancelled do
+              %{subscription_id: sub.id}
+              |> BillingCore.Credits.TerminationDispositionWorker.new()
+              |> Oban.insert!()
+            end
+
             updated
         end
       end)
@@ -1354,6 +1362,14 @@ defmodule BillingCore.Contracts do
             aggregate_version: sub.current_version,
             payload: %{change: change_label, external_id: sub.external_id, status: next_status}
           )
+
+          # BC-US-109: a finalized end-of-period cancellation durably
+          # triggers the remaining-credit disposition evaluation.
+          if next_status == :cancelled do
+            %{subscription_id: sub.id}
+            |> BillingCore.Credits.TerminationDispositionWorker.new()
+            |> Oban.insert!()
+          end
         end
 
         length(due)

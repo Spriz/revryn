@@ -1,0 +1,24 @@
+<h1><%= @current_organization.name %> · <%= @pipeline.name %></h1>
+<p><a href="<%= organization_path(@current_organization.slug) %>">&larr; Back</a></p>
+<div class="board" id="pipeline-board">
+  <% @pipeline.stages.each do |stage| %>
+    <section class="column" id="stage-<%= stage.id %>">
+      <h3><%= stage.name %></h3>
+      <% stage.deals.each do |deal| %>
+        <article class="task" id="deal-<%= deal.id %>">
+          <a href="<%= organization_deal_path(@current_organization.slug, deal.id) %>"><%= deal.title %></a>
+          <div class="taskmeta">
+            <span class="muted"><%= deal.amount_display %></span>
+            <% if deal.status != "open" %><span class="chip <%= deal.status %>"><%= deal.status %></span><% end %>
+          </div>
+        </article>
+      <% end %>
+      <%= form_with url: organization_deals_path(@current_organization.slug), method: :post, html: { class: "newtask" } do %>
+        <input type="hidden" name="stage_id" value="<%= stage.id %>">
+        <input name="title" placeholder="New deal…" required>
+        <input name="amount_ore" type="number" placeholder="amount in øre" value="0">
+        <button>Add</button>
+      <% end %>
+    </section>
+  <% end %>
+</div>

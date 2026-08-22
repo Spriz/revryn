@@ -1,0 +1,14 @@
+<h1><%= @current_organization.name %> · Companies</h1>
+<p><a href="<%= organization_path(@current_organization.slug) %>">&larr; Back</a></p>
+<%= form_with url: organization_companies_path(@current_organization.slug), method: :post, html: { id: "new-company-form", class: "card inlineform" } do %>
+  <input name="name" placeholder="Company name" required>
+  <input name="domain" placeholder="domain.dk">
+  <input name="city" placeholder="City">
+  <button id="create-company-submit">Add company</button>
+<% end %>
+<ul class="cardlist" id="company-list">
+  <% @companies.each do |company| %>
+    <li><a href="<%= organization_company_path(@current_organization.slug, company.id) %>"><%= company.name %></a>
+        <span class="muted"><%= company.city %></span></li>
+  <% end %>
+</ul>

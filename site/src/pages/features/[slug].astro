@@ -1,0 +1,112 @@
+---
+import { getCollection, render } from "astro:content";
+import Base from "../../layouts/Base.astro";
+
+export async function getStaticPaths() {
+  const features = await getCollection("features", (e) => e.data.public);
+  return features.map((entry) => ({
+    params: { slug: entry.id },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+---
+
+<Base
+  title={`${entry.data.title} — Revryn`}
+  description={`Revryn feature documentation: ${entry.data.title}.`}
+>
+  <section class="wrap doc-grid">
+    <article class="prose">
+      <p class="eyebrow">
+        <a href={`${base}/features/`}>Features</a> /
+        <span class={`badge ${entry.data.status}`}>{entry.data.status}</span>
+      </p>
+      <Content />
+    </article>
+    <aside class="meta">
+      <h4>Provenance</h4>
+      <p>
+        Source of truth:
+        <code>docs/features/{entry.id}.md</code>
+      </p>
+      {entry.data.adrs.length > 0 && (
+        <>
+          <h4>Spec &amp; decisions</h4>
+          <ul>
+            {entry.data.adrs.map((a: string) => (
+              <li>
+                <code>{a}</code>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {entry.data.graphql.length > 0 && (
+        <>
+          <h4>GraphQL surface</h4>
+          <ul>
+            {entry.data.graphql.map((g: string) => (
+              <li>
+                <a href={`${base}/graphql/#${g}`}>
+                  <code>{g}</code>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </aside>
+  </section>
+</Base>
+
+<style>
+  section {
+    padding: 3.5rem 0;
+  }
+  .doc-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 16rem;
+    gap: 3.5rem;
+    align-items: start;
+  }
+  .meta {
+    position: sticky;
+    top: 5.5rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-raised);
+    padding: 1.1rem 1.3rem;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+  .meta h4 {
+    margin: 1rem 0 0.35rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-faint);
+  }
+  .meta h4:first-child {
+    margin-top: 0;
+  }
+  .meta ul {
+    margin: 0;
+    padding-left: 1.1rem;
+  }
+  .meta li {
+    margin: 0.25rem 0;
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 900px) {
+    .doc-grid {
+      grid-template-columns: 1fr;
+    }
+    .meta {
+      position: static;
+    }
+  }
+</style>

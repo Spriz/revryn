@@ -515,6 +515,17 @@ defmodule BillingCore.Billing do
             reason_code: "invoice_application"
           )
 
+        # SPEC §9.4.1: every application opens exactly one receivable
+        # settlement in the same transaction; freezing rolls back when no
+        # settlement mode is certified.
+        BillingCore.Credits.Settlements.record_application!(
+          scope,
+          intent.id,
+          account,
+          applied,
+          currency
+        )
+
       _ ->
         :ok
     end
@@ -711,5 +722,4 @@ defmodule BillingCore.Billing do
   defp actor_id(_), do: nil
 
   defp correlation_id(%Scope{correlation_id: cid}), do: cid
-  defp correlation_id(_), do: nil
 end

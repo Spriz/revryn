@@ -978,40 +978,207 @@ defmodule BillingCoreWeb.DashboardLive do
 
   use BillingCoreWeb, :live_view
 
-  alias BillingCore.Orgs
+  alias BillingCore.{Demo, Orgs}
 
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash}>
-      <div class="mx-auto max-w-3xl py-8 space-y-8">
-        <.header>
-          Your teams
-          <:subtitle>Pick a team to work in — every billing view is team-scoped.</:subtitle>
-        </.header>
+      <div class={["mx-auto max-w-5xl space-y-10 py-6 sm:py-10"]}>
+        <header class="space-y-3">
+          <p class={[
+            "text-xs font-semibold uppercase tracking-[0.22em] text-emerald-700 dark:text-emerald-400"
+          ]}>
+            Revryn workspaces
+          </p>
+          <h1 class={[
+            "max-w-3xl text-3xl font-semibold tracking-tight text-zinc-950 sm:text-4xl dark:text-zinc-50"
+          ]}>
+            Trace billing decisions all the way into accounting.
+          </h1>
+          <p class={["max-w-2xl text-base leading-7 text-zinc-600 dark:text-zinc-300"]}>
+            Every workspace is an isolated company ledger. Choose one below, or use the guided
+            environment to see the full control trail before connecting real books.
+          </p>
+        </header>
 
-        <.empty_state :if={@org_groups == []} id="no-teams">
-          You are not a member of any team yet. Ask an organization owner to invite you.
-        </.empty_state>
+        <section
+          :if={@active_demo}
+          id="active-demo-workspace"
+          class={[
+            "group flex flex-col gap-5 rounded-2xl border border-emerald-200 bg-emerald-50/60 p-6 shadow-sm transition hover:border-emerald-300 hover:shadow-md sm:flex-row sm:items-center sm:justify-between dark:border-emerald-900 dark:bg-emerald-950/30"
+          ]}
+        >
+          <div class={["flex gap-4"]}>
+            <span class={[
+              "flex size-11 shrink-0 items-center justify-center rounded-xl bg-emerald-700 text-white shadow-sm dark:bg-emerald-500 dark:text-emerald-950"
+            ]}>
+              <.icon name="hero-beaker" class="size-5" />
+            </span>
+            <div>
+              <p class={["font-semibold text-zinc-950 dark:text-zinc-50"]}>
+                Your guided workspace is ready
+              </p>
+              <p class={["mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-300"]}>
+                Resume Northstar Studio at the exact accounting step you left.
+              </p>
+            </div>
+          </div>
+          <.link
+            id="resume-demo"
+            navigate={~p"/teams/#{@active_demo.team.id}/demo"}
+            class={[
+              "inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-zinc-950 px-5 text-sm font-semibold text-white transition hover:bg-zinc-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 dark:bg-zinc-50 dark:text-zinc-950 dark:hover:bg-white"
+            ]}
+          >
+            Resume the story
+            <.icon
+              name="hero-arrow-right"
+              class={["size-4 transition-transform group-hover:translate-x-0.5"]}
+            />
+          </.link>
+        </section>
 
-        <section :for={{organization, teams} <- @org_groups} class="space-y-2">
-          <h2 class="text-sm font-semibold uppercase tracking-wide opacity-60">
+        <section
+          :if={@org_groups == []}
+          id="no-teams"
+          class={[
+            "overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-[0_24px_70px_-40px_rgba(24,24,27,0.45)] dark:border-zinc-800 dark:bg-zinc-950"
+          ]}
+        >
+          <div class={["grid lg:grid-cols-[1.15fr_0.85fr]"]}>
+            <div class={["p-7 sm:p-10"]}>
+              <div class={[
+                "mb-7 flex size-12 items-center justify-center rounded-2xl bg-emerald-700 text-white shadow-lg shadow-emerald-900/15 dark:bg-emerald-500 dark:text-emerald-950"
+              ]}>
+                <.icon name="hero-arrows-right-left" class="size-6" />
+              </div>
+              <p class={["text-sm font-medium text-emerald-700 dark:text-emerald-400"]}>
+                A ten-minute accounting walkthrough
+              </p>
+              <h2 class={[
+                "mt-2 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50"
+              ]}>
+                Watch one subscription become a reconciled accounting fact.
+              </h2>
+              <p class={["mt-4 max-w-xl text-sm leading-6 text-zinc-600 dark:text-zinc-300"]}>
+                Explore a synthetic Danish SaaS company, follow its annual invoice and customer
+                credit, then inspect the aggregate voucher and evidence Revryn would place in the ERP.
+              </p>
+              <div class={["mt-7 flex flex-col gap-3 sm:flex-row sm:items-center"]}>
+                <.link
+                  id="explore-demo"
+                  navigate={~p"/start"}
+                  class={[
+                    "inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-5 text-sm font-semibold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-emerald-800 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 motion-reduce:transform-none dark:bg-emerald-500 dark:text-emerald-950 dark:hover:bg-emerald-400"
+                  ]}
+                >
+                  Explore with sample books <.icon name="hero-arrow-right" class="size-4" />
+                </.link>
+                <span class={["text-xs leading-5 text-zinc-500 dark:text-zinc-400"]}>
+                  No ERP credentials · isolated · resettable
+                </span>
+              </div>
+            </div>
+
+            <aside
+              id="real-workspace-path"
+              class={[
+                "border-t border-zinc-200 bg-zinc-50 p-7 sm:p-10 lg:border-l lg:border-t-0 dark:border-zinc-800 dark:bg-zinc-900/50"
+              ]}
+            >
+              <p class={[
+                "text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400"
+              ]}>
+                Ready with real books?
+              </p>
+              <h3 class={["mt-3 font-semibold text-zinc-950 dark:text-zinc-50"]}>
+                Set up a live workspace
+              </h3>
+              <p class={["mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300"]}>
+                Create a company workspace with your administrator, then connect e-conomic from
+                Settings. Revryn never mixes sample data with that connection.
+              </p>
+              <div class={[
+                "mt-6 flex items-start gap-3 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900"
+              ]}>
+                <.icon
+                  name="hero-shield-check"
+                  class={["mt-0.5 size-5 shrink-0 text-emerald-700 dark:text-emerald-400"]}
+                />
+                <p class={["text-xs leading-5 text-zinc-600 dark:text-zinc-300"]}>
+                  Real ERP writes remain approval-gated, idempotent, and reconciled by read-back.
+                </p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section :for={{organization, teams} <- @org_groups} class="space-y-3">
+          <h2 class={[
+            "text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400"
+          ]}>
             {organization.name}
           </h2>
-          <ul id={"org-#{organization.id}-teams"} class="grid gap-2 sm:grid-cols-2">
+          <ul id={"org-#{organization.id}-teams"} class={["grid gap-3 sm:grid-cols-2"]}>
             <li :for={team <- teams}>
               <.link
                 navigate={~p"/teams/#{team.id}"}
                 id={"team-link-#{team.id}"}
-                class="flex items-center justify-between rounded-lg border border-base-300 px-4 py-3 hover:border-primary hover:bg-base-200 transition-colors"
+                class={[
+                  "group flex min-h-24 items-center justify-between rounded-2xl border border-zinc-200 bg-white px-5 py-4 shadow-sm transition hover:-translate-y-0.5 hover:border-emerald-300 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 motion-reduce:transform-none dark:border-zinc-800 dark:bg-zinc-950 dark:hover:border-emerald-800"
+                ]}
               >
                 <span>
-                  <span class="block font-medium">{team.name}</span>
-                  <span class="block text-xs opacity-60">
+                  <span class={["block font-semibold text-zinc-950 dark:text-zinc-50"]}>{team.name}</span>
+                  <span class={["mt-1 block text-xs text-zinc-500 dark:text-zinc-400"]}>
                     {team.base_currency} · {team.time_zone}
                   </span>
                 </span>
-                <.icon name="hero-arrow-right" class="size-4 opacity-40" />
+                <.icon
+                  name="hero-arrow-right"
+                  class={[
+                    "size-4 text-zinc-400 transition-transform group-hover:translate-x-1 group-hover:text-emerald-700 dark:group-hover:text-emerald-400"
+                  ]}
+                />
               </.link>
+            </li>
+            <li :if={organization.id in @admin_org_ids}>
+              <details class={[
+                "flex min-h-24 rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-5 py-4 dark:border-zinc-700 dark:bg-zinc-900/40"
+              ]}>
+                <summary class={[
+                  "cursor-pointer select-none text-sm font-medium text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100"
+                ]}>
+                  + New team
+                </summary>
+                <form
+                  id={"new-team-form-#{organization.id}"}
+                  phx-submit="create_team"
+                  class={["mt-3 flex items-end gap-2"]}
+                >
+                  <input type="hidden" name="organization_id" value={organization.id} />
+                  <label class={["flex-1 text-xs text-zinc-500 dark:text-zinc-400"]}>
+                    Team name
+                    <input
+                      type="text"
+                      name="name"
+                      required
+                      class={[
+                        "mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                      ]}
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    phx-disable-with="Creating…"
+                    class={[
+                      "min-h-9 rounded-lg bg-zinc-900 px-3 text-sm font-semibold text-white dark:bg-zinc-100 dark:text-zinc-900"
+                    ]}
+                  >
+                    Create
+                  </button>
+                </form>
+              </details>
             </li>
           </ul>
         </section>
@@ -1021,12 +1188,55 @@ defmodule BillingCoreWeb.DashboardLive do
   end
 
   def mount(_params, _session, socket) do
+    active_demo =
+      case Demo.active_workspace(socket.assigns.current_user) do
+        {:ok, bundle} -> bundle
+        {:error, _reason} -> nil
+      end
+
+    {:ok,
+     socket
+     |> assign(page_title: "Workspaces", active_demo: active_demo)
+     |> load_workspaces()}
+  end
+
+  def handle_event("create_team", %{"organization_id" => organization_id, "name" => name}, socket) do
+    user = socket.assigns.current_user
+
+    with true <- organization_id in socket.assigns.admin_org_ids,
+         {:ok, scope} <- Orgs.resolve_scope(user, organization_id),
+         {:ok, team} <-
+           Orgs.create_team(scope.organization, %{name: name}, scope),
+         {:ok, _membership} <- Orgs.add_team_member(team, user, [:team_admin], scope) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Team created — you are its first admin.")
+       |> push_navigate(to: ~p"/teams/#{team.id}")}
+    else
+      false ->
+        {:noreply,
+         put_flash(socket, :error, "You are not an administrator of that organization.")}
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        {:noreply, put_flash(socket, :error, BillingCoreWeb.LiveHelpers.error_message(changeset))}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, BillingCoreWeb.LiveHelpers.error_message(reason))}
+    end
+  end
+
+  defp load_workspaces(socket) do
+    user = socket.assigns.current_user
+
     org_groups =
-      socket.assigns.current_user
+      user
       |> Orgs.list_user_teams()
       |> Enum.chunk_by(& &1.organization_id)
       |> Enum.map(fn [first | _] = teams -> {first.organization, teams} end)
 
-    {:ok, assign(socket, page_title: "Teams", org_groups: org_groups)}
+    assign(socket,
+      org_groups: org_groups,
+      admin_org_ids: Orgs.list_admin_organization_ids(user)
+    )
   end
 end

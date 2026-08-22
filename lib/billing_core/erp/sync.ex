@@ -238,7 +238,7 @@ defmodule BillingCore.ERP.Sync do
           )
 
           %{operation_id: retried.id, sync_operation_id: sync_op.id}
-          |> BillingCore.ERP.SyncWorker.new()
+          |> retry_worker(operation).new()
           |> Oban.insert!()
 
           retried
@@ -248,8 +248,75 @@ defmodule BillingCore.ERP.Sync do
     end
   end
 
+  @doc """
+  Remediate-and-requeue for a blocked ERP operation (§11.3, BC-US-156).
+
+  The operator fixes the underlying precondition first; this command then
+  moves `blocked → queued` and re-enqueues the SAME durable sync operation
+  (same operation key — idempotent replay, no duplicate external effect).
+  Authorization-class blocks (provider credentials/permissions) are
+  operator-only and require `team_admin`; other blocked preconditions are
+  finance remediations.
+  """
+  @spec remediate_operation(Scope.t(), Operations.Operation.t()) ::
+          {:ok, Operations.Operation.t()} | {:error, term()}
+  def remediate_operation(%Scope{} = scope, %Operations.Operation{} = operation) do
+    with :ok <- authorize_remediation(scope, operation),
+         :ok <- ensure_team(scope, operation.team_id),
+         :ok <- ensure_erp_operation(operation),
+         {:ok, requeued} <- Operations.transition(operation, :remediate) do
+      {:ok, requeued} =
+        Repo.transaction(fn ->
+          sync_op = Repo.get_by!(SyncOperation, operation_id: operation.id)
+
+          sync_op
+          |> Ecto.Changeset.change(state: "queued", next_attempt_at: nil)
+          |> Repo.update!()
+
+          if operation.type == "erp.create_draft" and operation.target_type == "invoice_intent" do
+            intent = Repo.get!(InvoiceIntent, operation.target_id)
+
+            case Billing.transition_intent(scope, intent, :retry_sync, reason: "remediated") do
+              {:ok, _lifecycle} -> :ok
+              {:error, {:illegal_state, _}} -> :ok
+            end
+          end
+
+          Audit.record!(scope, "erp.operation.remediated",
+            aggregate: {:operation, operation.id},
+            payload: %{error_class: operation.error_class}
+          )
+
+          %{operation_id: requeued.id, sync_operation_id: sync_op.id}
+          |> retry_worker(operation).new()
+          |> Oban.insert!()
+
+          requeued
+        end)
+
+      {:ok, requeued}
+    end
+  end
+
+  defp authorize_remediation(scope, %{error_class: "authorization"}),
+    do: authorize(scope, [:team_admin])
+
+  defp authorize_remediation(scope, _operation),
+    do: authorize(scope, [:finance_operator, :team_admin])
+
   defp ensure_erp_operation(%{type: "erp." <> _}), do: :ok
   defp ensure_erp_operation(_), do: {:error, :not_an_erp_operation}
+
+  # Close-posting operations execute through the close worker; re-enqueueing
+  # the invoice sync worker would load a voucher document with no invoice
+  # intent and crash the retry.
+  defp retry_worker(%{type: "erp.post_customer_credit_settlement"}),
+    do: BillingCore.Credits.SettlementWorker
+
+  defp retry_worker(%{type: "erp.post_customer_credit_close"}),
+    do: BillingCore.Credits.CloseWorker
+
+  defp retry_worker(_operation), do: BillingCore.ERP.SyncWorker
 
   ## Worker execution paths (called by SyncWorker)
 
@@ -425,6 +492,13 @@ defmodule BillingCore.ERP.Sync do
                 external_booked_number: external_doc.external_booked_number
               }
             )
+
+            # SPEC §9.4.1: once the invoice is booked the receivable
+            # exists, so its pending credit settlement (if any) gets its
+            # durable clearing-voucher operation in the same transaction.
+            if kind == :booked do
+              BillingCore.Credits.Settlements.enqueue_for_booked_intent!(doc)
+            end
           end)
 
         :ok

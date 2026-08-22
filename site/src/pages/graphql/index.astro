@@ -1,0 +1,253 @@
+---
+import Base from "../../layouts/Base.astro";
+import Field from "../../components/Field.astro";
+import {
+  queryFields,
+  mutationFields,
+  typeDocs,
+  namedTypeSet,
+  type TypeDoc,
+} from "../../lib/schema";
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+const groups: { kind: TypeDoc["kind"]; heading: string; items: TypeDoc[] }[] = (
+  [
+    ["object", "Object types"],
+    ["interface", "Interfaces"],
+    ["union", "Result unions"],
+    ["input", "Input types"],
+    ["enum", "Enums"],
+    ["scalar", "Scalars"],
+  ] as [TypeDoc["kind"], string][]
+).map(([kind, heading]) => ({
+  kind,
+  heading,
+  items: typeDocs.filter((t) => t.kind === kind),
+}));
+
+function link(named: string): boolean {
+  return namedTypeSet.has(named);
+}
+
+const counts = {
+  queries: queryFields.length,
+  mutations: mutationFields.length,
+  types: typeDocs.length,
+};
+---
+
+<Base
+  title="GraphQL API — Revryn"
+  description="Complete GraphQL API reference for the Revryn billing core, generated from the repository's canonical SDL artifact."
+>
+  <section class="wrap api-grid">
+    <nav class="toc">
+      <h4>Reference</h4>
+      <a href="#overview">Overview</a>
+      <a href="#queries">Queries ({counts.queries})</a>
+      <a href="#mutations">Mutations ({counts.mutations})</a>
+      {groups.filter((g) => g.items.length > 0).map((g) => (
+        <a href={`#${g.kind}s`}>
+          {g.heading} ({g.items.length})
+        </a>
+      ))}
+    </nav>
+
+    <div class="api-body">
+      <p class="eyebrow">API reference</p>
+      <h1 id="overview">GraphQL API</h1>
+      <p class="lede">
+        Generated from the repository's canonical SDL artifact
+        (<code>schema/billing_core.graphql</code>), which is regenerated from
+        the running schema and diff-tested in CI — this page cannot drift from
+        the code. The endpoint is <code>POST /api/graphql</code> with a
+        <code>Bearer</code> API token; every team-scoped field takes an
+        explicit <code>teamId</code> and is authorized against the caller's
+        membership scope. Mutations return typed result unions — validation
+        problems are data, not HTTP errors.
+      </p>
+
+      <h2 id="queries">Queries</h2>
+      {queryFields.map((f) => <Field f={f} />)}
+
+      <h2 id="mutations">Mutations</h2>
+      {mutationFields.map((f) => <Field f={f} />)}
+
+      {groups.filter((g) => g.items.length > 0).map((g) => (
+        <>
+          <h2 id={`${g.kind}s`}>{g.heading}</h2>
+          {g.items.map((t) => (
+            <article class="type" id={t.name}>
+              <h3>
+                <code>{t.name}</code>
+                <span class="kind">{g.kind}</span>
+              </h3>
+              {t.description && <p class="desc">{t.description}</p>}
+              {t.unionMembers.length > 0 && (
+                <p class="members">
+                  ={" "}
+                  {t.unionMembers.map((m, i) => (
+                    <>
+                      {i > 0 && " | "}
+                      <a href={`#${m}`}>
+                        <code>{m}</code>
+                      </a>
+                    </>
+                  ))}
+                </p>
+              )}
+              {t.fields.length > 0 && (
+                <table>
+                  <tbody>
+                    {t.fields.map((f) => (
+                      <tr>
+                        <td>
+                          <code>{f.name}</code>
+                        </td>
+                        <td>
+                          {link(f.type.named) ? (
+                            <a href={`#${f.type.named}`}>
+                              <code>{f.type.label}</code>
+                            </a>
+                          ) : (
+                            <code>{f.type.label}</code>
+                          )}
+                        </td>
+                        <td class="fdesc">{f.description}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {t.enumValues.length > 0 && (
+                <table>
+                  <tbody>
+                    {t.enumValues.map((v) => (
+                      <tr>
+                        <td>
+                          <code>{v.name}</code>
+                        </td>
+                        <td class="fdesc">{v.description}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </article>
+          ))}
+        </>
+      ))}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .api-grid {
+    display: grid;
+    grid-template-columns: 14rem minmax(0, 1fr);
+    gap: 3rem;
+    align-items: start;
+    padding: 3.5rem 1.5rem;
+  }
+  .toc {
+    position: sticky;
+    top: 5.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.875rem;
+  }
+  .toc h4 {
+    margin: 0 0 0.4rem;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-faint);
+  }
+  .toc a {
+    color: var(--text-dim);
+  }
+  .toc a:hover {
+    color: var(--text);
+    text-decoration: none;
+  }
+  h1 {
+    font-size: 2.4rem;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.75rem;
+  }
+  .lede {
+    color: var(--text-dim);
+    max-width: 46rem;
+    margin-bottom: 2rem;
+  }
+  h2 {
+    font-size: 1.5rem;
+    margin: 3rem 0 1rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+  }
+  .type {
+    margin: 1.5rem 0;
+  }
+  .type h3 {
+    font-size: 1rem;
+    margin: 0 0 0.3rem;
+    display: flex;
+    gap: 0.7rem;
+    align-items: baseline;
+  }
+  .type h3 code {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--blue);
+    font-size: 1rem;
+  }
+  .kind {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .desc,
+  .members {
+    color: var(--text-dim);
+    font-size: 0.925rem;
+    margin: 0.2rem 0 0.6rem;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.85rem;
+    display: block;
+    overflow-x: auto;
+  }
+  td {
+    border-top: 1px solid var(--border);
+    padding: 0.4rem 0.9rem 0.4rem 0;
+    vertical-align: top;
+    white-space: nowrap;
+  }
+  td.fdesc {
+    color: var(--text-dim);
+    white-space: normal;
+    min-width: 16rem;
+  }
+  @media (max-width: 900px) {
+    .api-grid {
+      grid-template-columns: 1fr;
+    }
+    .toc {
+      position: static;
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 0.9rem;
+    }
+    .toc h4 {
+      display: none;
+    }
+  }
+</style>

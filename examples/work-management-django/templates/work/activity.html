@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ organization.name }} · Activity</h1>
+<ul class="cardlist" id="activity-list">
+  {% for row in rows %}
+  <li><span class="muted">{{ row.created_at }}</span> <strong>{{ row.actor.display_name }}</strong> {{ row.summary }}</li>
+  {% endfor %}
+</ul>
+{% endblock %}

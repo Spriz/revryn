@@ -40,6 +40,7 @@ defmodule BillingCore.Credits.CreditTransaction do
     field :operation_id, Ecto.UUID
     field :reason_code, :string
     field :actor_reference, :string
+    field :accounting_effective_on, :date
     field :occurred_at, :utc_datetime_usec
     field :metadata, :map, default: %{}
 

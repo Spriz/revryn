@@ -1,0 +1,3 @@
+ID    PERIOD START  CURRENCY  STATE   CLOSING (MINOR)
+cc-1  2026-07-01    DKK       closed  250000
+cc-2  2026-08-01    DKK       ready   260000

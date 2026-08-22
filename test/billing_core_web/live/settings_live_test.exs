@@ -5,15 +5,9 @@ defmodule BillingCoreWeb.SettingsLiveTest do
   import BillingCoreWeb.WebHelpers
   import Phoenix.LiveViewTest
 
-  alias BillingCore.ERP.FakeERP
-
   setup %{conn: conn} do
-    fake = start_supervised!({FakeERP, []})
-    Application.put_env(:billing_core, :fake_erp_context, %{fake_server: fake})
-    on_exit(fn -> Application.delete_env(:billing_core, :fake_erp_context) end)
-
     scope = billing_scope_fixture([:team_admin, :billing_admin, :finance_operator])
-    %{conn: log_in_user(conn, scope.user), scope: scope, fake: fake}
+    %{conn: log_in_user(conn, scope.user), scope: scope}
   end
 
   test "shows team configuration", %{conn: conn, scope: scope} do
@@ -24,44 +18,44 @@ defmodule BillingCoreWeb.SettingsLiveTest do
     assert has_element?(view, "#new-connection-form")
   end
 
-  test "creates and validates an ERP connection rendering preflight checks (BC-US-003/004)",
+  test "creates only an e-conomic connection from the real workspace settings path",
        %{conn: conn, scope: scope} do
     {:ok, view, _html} = live(conn, ~p"/teams/#{scope.team.id}/settings")
 
+    refute has_element?(view, "#new-connection-form option[value='fake']")
+
     view
     |> form("#new-connection-form",
-      connection: %{provider: "fake", secret_reference: "unused"}
+      connection: %{provider: "economic", secret_reference: "unused"}
     )
     |> render_submit()
 
     assert has_element?(view, "#connection-status-badge", "unvalidated")
     assert has_element?(view, "#validate-connection")
-
-    view |> element("#validate-connection") |> render_click()
-
-    assert has_element?(view, "#connection-status-badge", "active")
-    assert has_element?(view, "#preflight-checks")
-    assert has_element?(view, "#preflight-checks", "pass")
+    assert {:ok, connection} = BillingCore.ERP.get_connection(scope)
+    assert connection.provider == "economic"
   end
 
-  test "a failing preflight check moves the connection to action_required",
-       %{conn: conn, scope: scope, fake: fake} do
-    FakeERP.set_preflight_checks(fake, [
-      %{check: :credentials, status: :pass, detail: "ok"},
-      %{check: :vat_zones, status: :fail, detail: "missing zone mapping"}
-    ])
-
+  test "configures raw-usage retention with the 90-day floor", %{conn: conn, scope: scope} do
     {:ok, view, _html} = live(conn, ~p"/teams/#{scope.team.id}/settings")
 
+    assert has_element?(view, "#retention-settings-form")
+
+    # A value below the floor is clamped, not accepted (SPEC §20: dispute
+    # and audit needs outrank storage preferences).
     view
-    |> form("#new-connection-form",
-      connection: %{provider: "fake", secret_reference: "unused"}
-    )
+    |> form("#retention-settings-form", retention: %{raw_usage_retention_days: "30"})
     |> render_submit()
 
-    view |> element("#validate-connection") |> render_click()
+    snapshot = BillingCore.Orgs.current_team_settings(scope.team)
+    assert snapshot.settings["raw_usage_retention_days"] == 90
 
-    assert has_element?(view, "#connection-status-badge", "action required")
-    assert has_element?(view, "#preflight-checks", "missing zone mapping")
+    # Clearing the field removes the configuration entirely.
+    view
+    |> form("#retention-settings-form", retention: %{raw_usage_retention_days: ""})
+    |> render_submit()
+
+    snapshot = BillingCore.Orgs.current_team_settings(scope.team)
+    refute Map.has_key?(snapshot.settings, "raw_usage_retention_days")
   end
 end

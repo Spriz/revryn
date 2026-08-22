@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>New project in {{ organization.name }}</h1>
+<form method="post" id="create-project-form" class="card narrow">{% csrf_token %}
+  <label>Name <input name="name" required></label>
+  <label>Description <textarea name="description"></textarea></label>
+  <button id="create-project-submit">Create project</button>
+</form>
+{% endblock %}

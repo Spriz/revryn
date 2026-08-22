@@ -122,7 +122,25 @@ Not yet implemented (BC-US-158 planned).
 
 ## UI behavior
 
-LiveView surfaces under construction; domain commands available via GraphQL.
+`/teams/:team_id/operations` (BC-US-156): a failure inbox distinguishing
+four remediation kinds derived from the §22.9.1 error class —
+
+- **automatic** (`retry_scheduled`/`outcome_unknown`/`reconciling`): the
+  retry policy is handling it; no action offered;
+- **user-fixable** (`failed` validation, `blocked` conflict): explicit
+  retry-is-safe statement (same operation key, no duplicate effect) and a
+  Retry / Remediate-and-requeue action;
+- **operator-only** (`blocked` authorization): requires `team_admin`; the
+  guidance points at revalidating the ERP connection under Settings first;
+- **non-retryable** (`failed` terminal/poison): no self-service action; the
+  item renders a copyable support bundle
+  (`revryn-support operation=… type=… code=… correlation=…`) that
+  identifies the audit trail without exposing any payload.
+
+Every action-required item shows the safe cause, attempts, next automatic
+attempt, correlation ID, affected business object link, and the bundle.
+The guided demo workspace can arm one-shot drills for all four kinds
+("More failure drills" on the invoice phase).
 
 ## Accounting / ERP effects
 
@@ -149,15 +167,26 @@ the Prometheus exporter), Oban job metrics, outbox
 unknown-outcome reconciliation, manual retry.
 `test/workflows/customer_credit_test.exs` — refund/expiry operations and
 their evidence.
+`test/billing_core_web/live/operations_live_test.exs` — inbox rendering,
+user-fixable retry, blocked remediation, operator-only gating (finance
+denied on authorization-class), non-retryable distinction and bundle.
+Playwright: `e2e/features/operations_inbox.spec.ts` (self-healing
+transient, operator-only revalidate-then-requeue, non-retryable bundle)
+plus the user-fixable retry drill in `demo_aha.spec.ts` — the four
+BC-US-156 scenarios.
 
 ## Security / privacy
 
-Team-scoped queries; manual retry is finance-role gated; sanitized error
-storage keeps provider payloads and secrets out of the database.
+Team-scoped queries; manual retry is finance-role gated and
+remediation of authorization-class blocks is team-admin gated in the
+domain command (`Sync.remediate_operation/2` — interfaces stay thin);
+sanitized error storage keeps provider payloads and secrets out of the
+database.
 
 ## Limitations
 
 - No GraphQL listing for the failure inbox yet (`failure_inbox/1` is
   context-level); no bulk retry.
-- `blocked → queued` (`remediate`) has no dedicated command surface beyond
-  direct context transitions.
+- Terminal operations remain manually retryable by authorized operators
+  through the CLI/GraphQL `retryOperation`; the inbox deliberately calls
+  them non-retryable and routes to escalation instead.

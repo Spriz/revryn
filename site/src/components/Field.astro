@@ -1,0 +1,99 @@
+---
+import { namedTypeSet, type FieldDoc } from "../lib/schema";
+
+interface Props {
+  f: FieldDoc;
+}
+const { f } = Astro.props;
+const linkable = (n: string) => namedTypeSet.has(n);
+---
+
+<article class="field" id={f.name}>
+  <h3>
+    <code
+      >{f.name}{f.args.length > 0 ? "(…)" : ""}: {" "}</code
+    >
+    {
+      linkable(f.type.named) ? (
+        <a href={`#${f.type.named}`}>
+          <code>{f.type.label}</code>
+        </a>
+      ) : (
+        <code>{f.type.label}</code>
+      )
+    }
+  </h3>
+  {f.description && <p class="desc">{f.description}</p>}
+  {
+    f.args.length > 0 && (
+      <table>
+        <tbody>
+          {f.args.map((a) => (
+            <tr>
+              <td>
+                <code>{a.name}</code>
+              </td>
+              <td>
+                {linkable(a.type.named) ? (
+                  <a href={`#${a.type.named}`}>
+                    <code>{a.type.label}</code>
+                  </a>
+                ) : (
+                  <code>{a.type.label}</code>
+                )}
+              </td>
+              <td class="fdesc">{a.description}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    )
+  }
+</article>
+
+<style>
+  .field {
+    margin: 1.4rem 0;
+    padding: 0.9rem 1.1rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-raised);
+  }
+  h3 {
+    font-size: 0.95rem;
+    margin: 0;
+  }
+  h3 code {
+    background: none;
+    border: 0;
+    padding: 0;
+    font-size: 0.95rem;
+  }
+  h3 > code {
+    color: var(--accent);
+  }
+  .desc {
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    margin: 0.35rem 0 0;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.83rem;
+    margin-top: 0.6rem;
+    display: block;
+    overflow-x: auto;
+  }
+  td {
+    border-top: 1px solid var(--border);
+    padding: 0.35rem 0.9rem 0.35rem 0;
+    vertical-align: top;
+    white-space: nowrap;
+  }
+  td.fdesc {
+    color: var(--text-dim);
+    white-space: normal;
+    min-width: 14rem;
+  }
+</style>

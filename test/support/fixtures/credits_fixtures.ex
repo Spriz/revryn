@@ -10,6 +10,37 @@ defmodule BillingCore.CreditsFixtures do
   alias BillingCore.Orgs
 
   @doc """
+  Certifies a receivable-settlement mode for the scope's team by creating a
+  currently effective close posting-policy version (SPEC §9.4.1). Automatic
+  credit application stays blocked until a test calls this.
+  """
+  def settlement_policy_fixture(scope, opts \\ []) do
+    mode = Keyword.get(opts, :settlement_mode, :external_reference)
+
+    attrs = %{
+      version: System.unique_integer([:positive]),
+      effective_from: Date.utc_today() |> Date.beginning_of_month(),
+      journal_number: Keyword.get(opts, :journal_number, 1),
+      liability_account_number: Keyword.get(opts, :liability_account_number, 2990),
+      posting_mode: :single_offset,
+      default_offset_account_number: 5890,
+      vat_neutral: true,
+      settlement_mode: mode,
+      settlement_clearing_account_number:
+        Keyword.get(opts, :settlement_clearing_account_number, settlement_default(mode, 5820)),
+      settlement_contra_account_number:
+        Keyword.get(opts, :settlement_contra_account_number, settlement_default(mode, 5821)),
+      created_by: scope.user && scope.user.id
+    }
+
+    {:ok, policy} = BillingCore.Credits.Close.create_policy(scope, attrs)
+    policy
+  end
+
+  defp settlement_default(:erp_customer_settlement, account), do: account
+  defp settlement_default(_mode, _account), do: nil
+
+  @doc """
   A complete credit test context: a team-resolved scope (default role
   `:finance_operator`), an organization-scoped commercial account, and its
   credit account (default currency `"DKK"`).

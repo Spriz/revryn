@@ -92,8 +92,11 @@ Quarantine entries: open → `resolved_at` set on accepted re-ingest.
 
 ## GraphQL contract
 
-None yet — ingestion, correction, and aggregation are Elixir context
-functions only (see Limitations).
+`ingestUsageEvent` (BC-US-050) and `ingestUsageBatch` (BC-US-051) with
+typed per-event outcomes (`accepted`/`duplicate`/`quarantined`),
+`voidUsageEvent` (BC-US-052, optional replacement), and the `usagePreview`
+query (BC-US-053: deterministic aggregation at a fixed cutoff). HTTP
+coverage in `test/graphql/usage_test.exs`.
 
 ## CLI surface
 

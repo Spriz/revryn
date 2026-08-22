@@ -14,6 +14,16 @@ import { defineConfig, devices } from "@playwright/test";
  * Suites live in `smoke/` (deploy/restore smoke tests) and `features/`
  * (complete product workflows). Shared data/helpers live in `fixtures/`.
  */
+/**
+ * Target selection: by default the suites run against the local dev server
+ * (booted below). Set PW_BASE_URL to point at an already-running server —
+ * the CI release job boots the compiled production release and sets this —
+ * which also disables the dev webServer (SPEC 23.6: required browser
+ * certification runs against the production release build).
+ */
+const baseURL = process.env.PW_BASE_URL || "http://localhost:4000";
+const useExternalServer = !!process.env.PW_BASE_URL;
+
 export default defineConfig({
   testDir: ".",
   testMatch: ["features/**/*.spec.ts", "smoke/**/*.spec.ts"],
@@ -32,7 +42,7 @@ export default defineConfig({
   outputDir: "test-results",
 
   use: {
-    baseURL: "http://localhost:4000",
+    baseURL,
     // SPEC 23.6: failed runs retain traces, screenshots, and video.
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
@@ -46,15 +56,17 @@ export default defineConfig({
     },
   ],
 
-  webServer: {
-    // Runs from e2e/; mise provides Erlang/Elixir, then boot Phoenix at repo root.
-    command: "bash -lc 'eval \"$(mise env -s bash)\" && cd .. && mix phx.server'",
-    port: 4000,
-    reuseExistingServer: true,
-    // First boot compiles the whole app; be generous.
-    timeout: 180_000,
-    // Retain Phoenix logs as evidence (SPEC 23.6).
-    stdout: "pipe",
-    stderr: "pipe",
-  },
+  webServer: useExternalServer
+    ? undefined
+    : {
+        // Runs from e2e/; mise provides Erlang/Elixir, then boot Phoenix at repo root.
+        command: "bash -lc 'eval \"$(mise env -s bash)\" && cd .. && mix phx.server'",
+        port: 4000,
+        reuseExistingServer: true,
+        // First boot compiles the whole app; be generous.
+        timeout: 180_000,
+        // Retain Phoenix logs as evidence (SPEC 23.6).
+        stdout: "pipe",
+        stderr: "pipe",
+      },
 });

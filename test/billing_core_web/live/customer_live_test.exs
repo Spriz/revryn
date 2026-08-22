@@ -118,6 +118,50 @@ defmodule BillingCoreWeb.CustomerLiveTest do
       assert has_element?(view, "#credit-account-#{credit_account.id}", "250.00 DKK")
     end
 
+    test "grants credit into the subledger from the customer page (BC-US-107)", %{
+      conn: conn,
+      scope: scope
+    } do
+      customer = customer_fixture(scope)
+      account = account_fixture(scope.organization)
+      {:ok, _projection} = Orgs.project_account_to_team(account, scope.team, customer.id)
+      {:ok, credit_account} = Credits.get_or_create_account(scope, account.id, "DKK")
+
+      {:ok, view, _html} = live(conn, ~p"/teams/#{scope.team.id}/customers/#{customer.id}")
+
+      view
+      |> form("#grant-credit-form",
+        grant: %{
+          credit_account_id: credit_account.id,
+          origin_type: "goodwill",
+          amount: "125.00",
+          reason_code: "incident_42"
+        }
+      )
+      |> render_submit()
+
+      assert has_element?(view, "#credit-account-#{credit_account.id}", "125.00 DKK")
+
+      # The grant is a real subledger movement, not UI state.
+      {:ok, [grant]} = Credits.list_grants(scope, credit_account)
+      assert grant.origin_type == "goodwill"
+      assert grant.granted_minor == 12_500
+
+      # An invalid amount is rejected with a flash, not a crash.
+      view
+      |> form("#grant-credit-form",
+        grant: %{
+          credit_account_id: credit_account.id,
+          origin_type: "goodwill",
+          amount: "-5",
+          reason_code: ""
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "plain positive number"
+    end
+
     test "another team's customer is not reachable", %{conn: conn, scope: scope} do
       other_scope = billing_scope_fixture()
       other_customer = customer_fixture(other_scope)

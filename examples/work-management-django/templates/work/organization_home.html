@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ organization.name }}</h1>
+<nav class="subnav">
+  <a id="org-members" href="{% url 'members' organization.slug %}">Members</a>
+  <a id="org-search" href="{% url 'search' organization.slug %}">Search</a>
+  <a id="org-activity" href="{% url 'activity' organization.slug %}">Activity</a>
+  <a id="org-billing" href="{% url 'usage_and_plan' organization.slug %}">Usage &amp; plan</a>
+</nav>
+<h2>Projects</h2>
+<ul class="cardlist" id="project-list">
+  {% for project in projects %}
+  <li><a href="{% url 'project_detail' project.id %}">{{ project.name }}</a></li>
+  {% empty %}<li id="no-projects">No projects yet.</li>{% endfor %}
+</ul>
+<p><a class="button" id="new-project" href="{% url 'create_project' organization.slug %}">New project</a></p>
+{% endblock %}

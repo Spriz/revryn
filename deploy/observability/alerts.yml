@@ -1,0 +1,57 @@
+# Reference Prometheus alert rules for Billing Core (BC-TASK-095 follow-up).
+# Metric names are the TelemetryMetricsPrometheus renderings of
+# BillingCore.Metrics; scrape the exporter on :9568. Tune thresholds to
+# your §21.1 objectives before production use.
+groups:
+  - name: billing-core
+    rules:
+      - alert: BillingCoreDown
+        expr: up{job="billing-core"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Billing Core exporter unreachable"
+          runbook: docs/runbooks/deploy-and-operate.md
+
+      - alert: HttpServerErrorRate
+        expr: >
+          sum(rate(billing_http_requests_total{status_class="5xx"}[5m]))
+          / clamp_min(sum(rate(billing_http_requests_total[5m])), 1e-9) > 0.01
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "HTTP 5xx above 1% — §21.1 availability objective at risk"
+          runbook: docs/runbooks/deploy-and-operate.md
+
+      - alert: ObanJobErrors
+        expr: sum(rate(oban_jobs_errored_total[10m])) > 0.1
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Background jobs erroring — check the operations inbox and doctor queues"
+          runbook: docs/runbooks/deploy-and-operate.md
+
+      - alert: OperationsEnteringFailedOrBlocked
+        expr: >
+          sum(rate(billing_operations_transitions_total{to_state=~"failed|blocked"}[15m])) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Durable operations dead-lettering or blocking — action required in the inbox"
+          runbook: docs/features/operations-and-failure-inbox.md
+
+      - alert: OutboxStalled
+        expr: sum(rate(billing_outbox_published_total[15m])) == 0 and sum(rate(billing_operations_transitions_total[15m])) > 0
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: "Domain events not publishing while work is happening — relay stalled"
+          runbook: docs/runbooks/deploy-and-operate.md
+
+      - alert: BeamMemoryGrowth
+        expr: vm_memory_total_kilobyte > 4 * 1024 * 1024
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "BEAM memory beyond 4 GiB — compare against the capacity baseline"
+          runbook: docs/reviews/capacity-v1.md

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ project.name }}</h1>
+<p class="muted">{{ project.description }}</p>
+<nav class="subnav">
+  <a href="{% url 'organization_home' project.organization.slug %}">&larr; {{ project.organization.name }}</a>
+  <a id="project-rules" href="{% url 'rules' project.id %}">Automation</a>
+</nav>
+<h2>Boards</h2>
+<ul class="cardlist" id="board-list">
+  {% for board in boards %}<li><a href="{% url 'board_detail' board.id %}">{{ board.name }}</a></li>{% endfor %}
+</ul>
+<form method="post" action="{% url 'create_board' project.id %}" class="inline card">{% csrf_token %}
+  <input name="name" placeholder="New board name" required>
+  <button id="create-board-submit">Add board</button>
+</form>
+<h2>Labels</h2>
+<ul class="labels" id="label-list">
+  {% for label in labels %}<li style="background: {{ label.color }}">{{ label.name }}</li>{% endfor %}
+</ul>
+<form method="post" action="{% url 'create_label' project.id %}" class="inline card">{% csrf_token %}
+  <input name="name" placeholder="New label" required>
+  <input name="color" type="color" value="#5b8def">
+  <button id="create-label-submit">Add label</button>
+</form>
+{% endblock %}

@@ -1,0 +1,5 @@
+<h1>New organization</h1>
+<%= form_with url: organizations_path, method: :post, html: { id: "create-org-form", class: "card narrow" } do %>
+  <label>Name <input name="name" required placeholder="e.g. Kystvej Consulting"></label>
+  <button id="create-org-submit">Create organization</button>
+<% end %>

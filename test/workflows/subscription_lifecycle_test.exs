@@ -345,7 +345,8 @@ defmodule BillingCore.Workflows.SubscriptionLifecycleTest do
       assert {:ok, cancelled} =
                Contracts.cancel_subscription(ctx.scope, subscription, %{
                  mode: :immediate,
-                 reason: "fraud"
+                 reason: "fraud",
+                 effective_date: ctx.today
                })
 
       assert cancelled.status == :cancelled

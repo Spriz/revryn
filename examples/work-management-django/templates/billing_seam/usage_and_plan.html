@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ organization.name }} · Usage &amp; plan</h1>
+<p class="muted">Standalone showcase fixtures — served through the application-local billing seam.</p>
+<div class="grid2">
+<section class="card" id="seats-card">
+  <h2>Seats</h2>
+  <p><strong id="active-members">{{ summary.active_members }}</strong> active members on the
+     <strong id="seat-tier">{{ summary.seat_tier_name }}</strong> tier
+     at <span id="seat-price">{{ seat_price }}</span> per member/month.</p>
+  <p>Seat total: <strong id="seat-total">{{ seat_total }}</strong></p>
+</section>
+<section class="card" id="usage-card">
+  <h2>Automation usage this month</h2>
+  <p><strong id="automation-runs">{{ summary.automation_runs }}</strong> runs ·
+     {{ summary.included_runs }} included ·
+     <span id="overage-runs">{{ summary.overage_runs }}</span> overage</p>
+  <p>Overage total: <strong id="overage-total">{{ overage_total }}</strong></p>
+</section>
+</div>
+<p class="big">Projected month total: <strong id="month-total">{{ total }}</strong></p>
+
+{% if summary.preview_lines %}
+<section class="card" id="preview-traceability">
+  <h2>Billing Core invoice preview</h2>
+  <p class="muted">Live from the platform — fingerprint
+     <code id="preview-fingerprint">{{ summary.preview_fingerprint }}</code></p>
+  <table class="table" id="preview-lines">
+    <thead><tr><th>Line</th><th>Description</th><th>Qty</th><th>Amount (minor)</th></tr></thead>
+    <tbody>
+    {% for line in summary.preview_lines %}
+      <tr><td class="muted">{{ line.lineKey }}</td><td>{{ line.description }}</td>
+          <td>{{ line.quantity }}</td><td>{{ line.amountMinor }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

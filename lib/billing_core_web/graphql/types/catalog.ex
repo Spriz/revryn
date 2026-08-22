@@ -241,4 +241,35 @@ defmodule BillingCoreWeb.GraphQL.Types.Catalog do
       Errors.resolve_union(value, :publish_plan_version_success)
     end)
   end
+
+  ## mapProductToErp (BC-US-011)
+
+  object :product_erp_mapping do
+    field :id, non_null(:id)
+    field :product_id, non_null(:id)
+    field :erp_connection_id, non_null(:id)
+    field :external_product_number, non_null(:string)
+    field :validation_status, non_null(:string)
+  end
+
+  input_object :map_product_to_erp_input do
+    field :team_id, non_null(:id)
+    field :product_id, non_null(:id)
+    field :erp_connection_id, non_null(:id)
+    field :external_product_number, non_null(:string)
+    field :client_mutation_id, non_null(:string)
+  end
+
+  object :map_product_to_erp_success do
+    field :mapping, non_null(:product_erp_mapping)
+    field :client_mutation_id, non_null(:string)
+  end
+
+  union :map_product_to_erp_result do
+    types([:map_product_to_erp_success, :validation_problem, :authorization_problem])
+
+    resolve_type(fn value, _ ->
+      Errors.resolve_union(value, :map_product_to_erp_success)
+    end)
+  end
 end

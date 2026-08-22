@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Driftbord{% endblock %}
+{% block content %}
+<h1>Sign in</h1>
+<form method="post" id="login-form" class="card narrow">{% csrf_token %}
+  <label>Email <input type="email" name="email" required></label>
+  <label>Password <input type="password" name="password" required></label>
+  <button id="login-submit">Sign in</button>
+  <p><a href="{% url 'register' %}">New here? Create an account</a></p>
+</form>
+{% endblock %}

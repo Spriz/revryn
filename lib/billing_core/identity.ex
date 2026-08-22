@@ -53,6 +53,9 @@ defmodule BillingCore.Identity do
   """
   @spec register_user(String.t()) ::
           {:ok, User.t()} | {:error, :email_taken} | {:error, Ecto.Changeset.t()}
+  # Dialyzer false positive: the literal Multi.new() loses MapSet's
+  # opaqueness when inlined into the Multi.insert call.
+  @dialyzer {:no_opaque, register_user: 1}
   def register_user(email) when is_binary(email) do
     Multi.new()
     |> Multi.insert(:user, User.changeset(%User{}, %{}))
@@ -362,9 +365,20 @@ defmodule BillingCore.Identity do
   @spec register_webauthn_credential(User.t(), map()) ::
           {:ok, WebauthnCredential.t()} | {:error, Ecto.Changeset.t()}
   def register_webauthn_credential(%User{} = user, attrs) do
-    %WebauthnCredential{user_id: user.id}
-    |> WebauthnCredential.changeset(attrs)
-    |> Repo.insert()
+    case %WebauthnCredential{user_id: user.id}
+         |> WebauthnCredential.changeset(attrs)
+         |> Repo.insert() do
+      {:ok, credential} ->
+        BillingCore.Notifications.notify_security_event(user, :passkey_added, %{
+          credential_name: credential.name,
+          dedupe_key: credential.id
+        })
+
+        {:ok, credential}
+
+      {:error, changeset} ->
+        {:error, changeset}
+    end
   end
 
   @doc "Lists the non-revoked WebAuthn credentials of `user`."
@@ -386,7 +400,18 @@ defmodule BillingCore.Identity do
     do: {:ok, credential}
 
   def revoke_webauthn_credential(%WebauthnCredential{} = credential) do
-    revoke_credential(credential, "identity.webauthn_credential.revoked", "webauthn_credential")
+    result =
+      revoke_credential(credential, "identity.webauthn_credential.revoked", "webauthn_credential")
+
+    with {:ok, revoked} <- result,
+         %User{} = user <- Repo.get(User, revoked.user_id) do
+      BillingCore.Notifications.notify_security_event(user, :passkey_revoked, %{
+        credential_name: credential.name,
+        dedupe_key: "revoke-#{revoked.id}"
+      })
+    end
+
+    result
   end
 
   ## TOTP factors (persistence only — no ceremony logic)
@@ -658,6 +683,10 @@ defmodule BillingCore.Identity do
               aggregate: {"recovery_code", code_id},
               payload: %{user_id: user.id}
             )
+
+            BillingCore.Notifications.notify_security_event(user, :recovery_code_used, %{
+              dedupe_key: "recovery-#{code_id}"
+            })
 
             :ok
 

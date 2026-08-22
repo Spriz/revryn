@@ -139,4 +139,65 @@ defmodule BillingCoreWeb.OperationsLiveTest do
     refute has_element?(view, "#operation-#{book_op.id}")
     assert has_element?(view, "#recent-operation-#{book_op.id}", "queued")
   end
+
+  test "an authorization failure is operator-only: distinguished, gated, and remediable by admins",
+       %{conn: conn, path: path, scope: scope, fake: fake, intent: intent} do
+    FakeERP.inject_failure(fake, :create_draft, {:error, {:authorization, %{detail: "revoked"}}})
+
+    {:ok, operation} = Sync.request_synchronization(scope, intent)
+    Oban.drain_queue(queue: :erp, with_safety: false)
+    assert Operations.get!(operation.id).state == "blocked"
+
+    {:ok, view, _html} = live(conn, path)
+
+    assert has_element?(view, "#operation-#{operation.id}", "operator-only")
+    assert has_element?(view, "#safety-#{operation.id}", "team admin must revalidate")
+    assert has_element?(view, "#bundle-#{operation.id}")
+    refute has_element?(view, "#retry-#{operation.id}")
+
+    # A finance operator without team_admin cannot requeue an
+    # authorization-class failure (BC-US-156 operator-only gating).
+    finance = team_scope_fixture(scope.organization, scope.team, [:finance_operator])
+    finance_conn = log_in_user(Phoenix.ConnTest.build_conn(), finance.user)
+    {:ok, finance_view, _html} = live(finance_conn, path)
+
+    finance_view |> element("#remediate-#{operation.id}") |> render_click()
+    assert Operations.get!(operation.id).state == "blocked"
+
+    # The team admin requeues; with the one-shot injection consumed the
+    # replay succeeds under the same operation key.
+    view |> element("#remediate-#{operation.id}") |> render_click()
+    assert Operations.get!(operation.id).state == "queued"
+    assert %{success: 1} = Oban.drain_queue(queue: :erp, with_safety: false)
+    assert Operations.get!(operation.id).state == "succeeded"
+  end
+
+  test "a terminal failure is non-retryable: no retry action, escalation bundle instead",
+       %{conn: conn, path: path, scope: scope, fake: fake, intent: intent} do
+    FakeERP.inject_failure(
+      fake,
+      :create_draft,
+      {:error, {:unsupported_capability, :simulated_defect}}
+    )
+
+    {:ok, operation} = Sync.request_synchronization(scope, intent)
+    Oban.drain_queue(queue: :erp, with_safety: false)
+
+    operation = Operations.get!(operation.id)
+    assert operation.state == "failed"
+    assert operation.error_class == "terminal"
+
+    {:ok, view, _html} = live(conn, path)
+
+    assert has_element?(view, "#operation-#{operation.id}", "non-retryable")
+    refute has_element?(view, "#retry-#{operation.id}")
+    refute has_element?(view, "#remediate-#{operation.id}")
+    assert has_element?(view, "#safety-#{operation.id}", "Not retryable")
+
+    # The support bundle identifies the operation and audit trail without
+    # exposing payloads (BC-US-156).
+    html = render(view)
+    assert html =~ "revryn-support operation=#{operation.id}"
+    assert html =~ "correlation="
+  end
 end

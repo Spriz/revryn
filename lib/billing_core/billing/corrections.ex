@@ -19,6 +19,8 @@ defmodule BillingCore.Billing.Corrections do
     @moduledoc false
     use Ecto.Schema
 
+    @type t :: %__MODULE__{}
+
     @schema_prefix "billing"
     @primary_key {:id, Ecto.UUID, autogenerate: true}
     @timestamps_opts [type: :utc_datetime_usec, inserted_at: :created_at]
@@ -125,29 +127,40 @@ defmodule BillingCore.Billing.Corrections do
     with :ok <- authorize(scope),
          :ok <- ensure_team(scope, correction_case.team_id),
          :ok <- ensure_documents_booked(correction_case) do
-      {:ok, completed} =
-        Repo.transaction(fn ->
-          completed =
-            correction_case
-            |> Ecto.Changeset.change(status: "completed")
-            |> Repo.update!()
-
-          Audit.record!(scope, "billing.correction.completed",
-            aggregate: {:correction_case, completed.id}
-          )
-
-          Outbox.emit!("correction_case.completed.v1",
-            aggregate: {:correction_case, completed.id},
-            team_id: completed.team_id,
-            correlation_id: scope.correlation_id,
-            payload: %{original_invoice_intent_id: completed.original_invoice_intent_id}
-          )
-
-          completed
-        end)
-
-      {:ok, completed}
+      Repo.transaction(fn ->
+        do_complete_case!(scope, correction_case)
+      end)
     end
+  end
+
+  defp do_complete_case!(scope, correction_case) do
+    # BC-US-107: an authoritative unused-prepaid-service credit note funds
+    # the customer-credit ledger exactly once (case-derived idempotency key)
+    # as part of case completion — never silently skipped.
+    if correction_case.reason_code == "unused_prepaid_service" do
+      case BillingCore.Credits.UnusedService.fund_from_case(scope, correction_case) do
+        {:ok, _grant} -> :ok
+        {:error, reason} -> Repo.rollback({:credit_funding_failed, reason})
+      end
+    end
+
+    completed =
+      correction_case
+      |> Ecto.Changeset.change(status: "completed")
+      |> Repo.update!()
+
+    Audit.record!(scope, "billing.correction.completed",
+      aggregate: {:correction_case, completed.id}
+    )
+
+    Outbox.emit!("correction_case.completed.v1",
+      aggregate: {:correction_case, completed.id},
+      team_id: completed.team_id,
+      correlation_id: scope.correlation_id,
+      payload: %{original_invoice_intent_id: completed.original_invoice_intent_id}
+    )
+
+    completed
   end
 
   defp ensure_documents_booked(correction_case) do

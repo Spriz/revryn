@@ -39,6 +39,7 @@ defmodule BillingCore.ERP.FakeERP do
   alias BillingCore.Domain.{Canonical, Period}
   alias BillingCore.ERP.{CanonicalInvoice, Document, Fingerprint}
   alias BillingCore.ERP.CanonicalInvoice.Line
+  alias BillingCore.ERP.Vouchers.{AttachmentEvidence, FinanceVoucher, Voucher}
 
   @operations [
     :capabilities,
@@ -47,10 +48,21 @@ defmodule BillingCore.ERP.FakeERP do
     :create_draft,
     :update_draft,
     :get_document,
-    :book_document
+    :book_document,
+    :find_finance_voucher,
+    :create_finance_voucher,
+    :get_finance_voucher,
+    :attach_voucher_report,
+    :get_voucher_attachment
   ]
 
-  @write_operations [:create_draft, :update_draft, :book_document]
+  @write_operations [
+    :create_draft,
+    :update_draft,
+    :book_document,
+    :create_finance_voucher,
+    :attach_voucher_report
+  ]
 
   @default_capabilities %{
     supports_draft_invoices: true,
@@ -59,6 +71,9 @@ defmodule BillingCore.ERP.FakeERP do
     supports_invoice_webhooks: true,
     supports_line_accrual_periods: true,
     supports_customer_provisioning: true,
+    supports_customer_credit_settlements: false,
+    supports_finance_vouchers: true,
+    supports_voucher_attachments: true,
     supported_delivery_modes: [:none, :email],
     amount_scale: 2,
     quantity_scale: 2
@@ -88,7 +103,13 @@ defmodule BillingCore.ERP.FakeERP do
   """
   def start_link(opts \\ []) do
     {name_opts, opts} = Keyword.split(opts, [:name])
-    GenServer.start_link(__MODULE__, opts, name_opts)
+
+    with :ok <- validate_persist_callback(Keyword.get(opts, :persist_snapshot)),
+         :ok <- validate_start_snapshot(Keyword.get(opts, :snapshot)) do
+      GenServer.start_link(__MODULE__, opts, name_opts)
+    else
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @doc """
@@ -134,6 +155,25 @@ defmodule BillingCore.ERP.FakeERP do
   @impl BillingCore.ERP.Adapter
   def book_document(ctx, document_ref, booking_options, operation_key),
     do: call(ctx, {:book_document, document_ref, booking_options, operation_key})
+
+  @impl BillingCore.ERP.Adapter
+  def find_finance_voucher(ctx, external_reference),
+    do: call(ctx, {:find_finance_voucher, external_reference})
+
+  @impl BillingCore.ERP.Adapter
+  def create_finance_voucher(ctx, %FinanceVoucher{} = voucher, operation_key),
+    do: call(ctx, {:create_finance_voucher, voucher, operation_key})
+
+  @impl BillingCore.ERP.Adapter
+  def get_finance_voucher(ctx, voucher_ref), do: call(ctx, {:get_finance_voucher, voucher_ref})
+
+  @impl BillingCore.ERP.Adapter
+  def attach_voucher_report(ctx, voucher_ref, %AttachmentEvidence{} = evidence, operation_key),
+    do: call(ctx, {:attach_voucher_report, voucher_ref, evidence, operation_key})
+
+  @impl BillingCore.ERP.Adapter
+  def get_voucher_attachment(ctx, voucher_ref),
+    do: call(ctx, {:get_voucher_attachment, voucher_ref})
 
   defp call(%{fake_server: server}, request), do: GenServer.call(server, request)
 
@@ -209,6 +249,19 @@ defmodule BillingCore.ERP.FakeERP do
   @doc "All stored documents (drafts then booked, in id order) for assertions."
   def list_documents(server), do: GenServer.call(server, :list_documents)
 
+  @doc "All stored finance vouchers, in deterministic external-number order."
+  def list_finance_vouchers(server), do: GenServer.call(server, :list_finance_vouchers)
+
+  @doc """
+  Exports the durable provider state as a versioned, hash-bound binary snapshot.
+
+  Fault-injection controls, callbacks, webhook delivery history, and the
+  short-lived idempotency response cache are intentionally excluded.
+  """
+  @spec export_snapshot(GenServer.server()) ::
+          {:ok, %{format_version: 1, payload: binary(), sha256: String.t()}}
+  def export_snapshot(server), do: GenServer.call(server, :export_snapshot)
+
   @doc "Replaces the preflight check results returned by `preflight/2`."
   def set_preflight_checks(server, checks) when is_list(checks) do
     GenServer.call(server, {:set_preflight_checks, checks})
@@ -231,100 +284,199 @@ defmodule BillingCore.ERP.FakeERP do
       injections: %{},
       unknown_next: MapSet.new(),
       webhook_sink: nil,
-      webhook_events: %{}
+      webhook_events: %{},
+      vouchers: %{},
+      voucher_by_reference: %{},
+      voucher_attachments: %{},
+      next_voucher_number: 1,
+      persist_snapshot: Keyword.get(opts, :persist_snapshot),
+      snapshot_dirty?: false
     }
 
-    {:ok, state}
+    case Keyword.get(opts, :snapshot) do
+      nil -> {:ok, state}
+      snapshot -> restore_snapshot(state, snapshot)
+    end
   end
 
   @impl GenServer
   def handle_call(:capabilities, _from, state) do
-    with_injection(state, :capabilities, fn state ->
-      {{:ok, state.capabilities}, state}
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :capabilities, fn state ->
+        {{:ok, state.capabilities}, state}
+      end)
     end)
   end
 
   def handle_call({:preflight, _input}, _from, state) do
-    with_injection(state, :preflight, fn state ->
-      result = %{
-        checks: state.preflight_checks,
-        capabilities: state.capabilities,
-        evidence: %{
-          provider: :fake_erp,
-          agreement: "123456",
-          base_currency: "DKK",
-          checked_at: DateTime.utc_now()
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :preflight, fn state ->
+        result = %{
+          checks: state.preflight_checks,
+          capabilities: state.capabilities,
+          evidence: %{
+            provider: :fake_erp,
+            agreement: "123456",
+            base_currency: "DKK",
+            checked_at: DateTime.utc_now()
+          }
         }
-      }
 
-      {{:ok, result}, state}
+        {{:ok, result}, state}
+      end)
     end)
   end
 
   def handle_call({:find_document, external_reference}, _from, state) do
-    with_injection(state, :find_document, fn state ->
-      case resolve_ref(state, {:external_reference, external_reference}) do
-        {_kind, _id, doc} -> {{:ok, doc}, state}
-        :not_found -> {{:ok, nil}, state}
-      end
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :find_document, fn state ->
+        case resolve_ref(state, {:external_reference, external_reference}) do
+          {_kind, _id, doc} -> {{:ok, doc}, state}
+          :not_found -> {{:ok, nil}, state}
+        end
+      end)
     end)
   end
 
   def handle_call({:get_document, document_ref}, _from, state) do
-    with_injection(state, :get_document, fn state ->
-      {do_get_document(state, document_ref), state}
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :get_document, fn state ->
+        {do_get_document(state, document_ref), state}
+      end)
     end)
   end
 
   def handle_call({:create_draft, invoice, op_key}, _from, state) do
-    with_injection(state, :create_draft, fn state ->
-      hint = fn _result ->
-        %{
-          search_by: [{:external_reference, invoice.external_reference}],
-          detail: "create_draft response lost after commit"
-        }
-      end
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :create_draft, fn state ->
+        hint = fn _result ->
+          %{
+            search_by: [{:external_reference, invoice.external_reference}],
+            detail: "create_draft response lost after commit"
+          }
+        end
 
-      run_write(state, :create_draft, op_key, hint, &do_create_draft(&1, invoice))
+        run_write(state, :create_draft, op_key, hint, &do_create_draft(&1, invoice))
+      end)
     end)
   end
 
   def handle_call({:update_draft, document_ref, invoice, op_key}, _from, state) do
-    with_injection(state, :update_draft, fn state ->
-      hint = fn _result ->
-        %{
-          search_by: Enum.uniq([document_ref, {:external_reference, invoice.external_reference}]),
-          detail: "update_draft response lost after commit"
-        }
-      end
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :update_draft, fn state ->
+        hint = fn _result ->
+          %{
+            search_by:
+              Enum.uniq([document_ref, {:external_reference, invoice.external_reference}]),
+            detail: "update_draft response lost after commit"
+          }
+        end
 
-      run_write(state, :update_draft, op_key, hint, &do_update_draft(&1, document_ref, invoice))
+        run_write(state, :update_draft, op_key, hint, &do_update_draft(&1, document_ref, invoice))
+      end)
     end)
   end
 
   def handle_call({:book_document, document_ref, booking_options, op_key}, _from, state) do
-    with_injection(state, :book_document, fn state ->
-      hint = fn
-        {:ok, %Document{} = doc} ->
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :book_document, fn state ->
+        hint = fn
+          {:ok, %Document{} = doc} ->
+            %{
+              search_by: [
+                {:external_reference, doc.external_reference},
+                {:booked, doc.external_booked_number}
+              ],
+              detail: "book_document response lost after commit"
+            }
+
+          _other ->
+            %{search_by: [document_ref], detail: "book_document response lost"}
+        end
+
+        run_write(
+          state,
+          :book_document,
+          op_key,
+          hint,
+          &do_book_document(&1, document_ref, booking_options)
+        )
+      end)
+    end)
+  end
+
+  def handle_call({:find_finance_voucher, external_reference}, _from, state) do
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :find_finance_voucher, fn state ->
+        voucher =
+          case Map.get(state.voucher_by_reference, external_reference) do
+            nil -> nil
+            number -> Map.fetch!(state.vouchers, number)
+          end
+
+        {{:ok, voucher}, state}
+      end)
+    end)
+  end
+
+  def handle_call({:get_finance_voucher, voucher_ref}, _from, state) do
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :get_finance_voucher, fn state ->
+        {{:ok, resolve_voucher(state, voucher_ref)}, state}
+      end)
+    end)
+  end
+
+  def handle_call({:create_finance_voucher, voucher, op_key}, _from, state) do
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :create_finance_voucher, fn state ->
+        hint = fn _result ->
           %{
-            search_by: [
-              {:external_reference, doc.external_reference},
-              {:booked, doc.external_booked_number}
-            ],
-            detail: "book_document response lost after commit"
+            search_by: [{:external_reference, voucher.external_reference}],
+            detail: "create_finance_voucher response lost after commit"
           }
+        end
 
-        _other ->
-          %{search_by: [document_ref], detail: "book_document response lost"}
-      end
+        run_write(state, :create_finance_voucher, op_key, hint, &do_create_voucher(&1, voucher))
+      end)
+    end)
+  end
 
-      run_write(
-        state,
-        :book_document,
-        op_key,
-        hint,
-        &do_book_document(&1, document_ref, booking_options)
-      )
+  def handle_call({:attach_voucher_report, voucher_ref, evidence, op_key}, _from, state) do
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :attach_voucher_report, fn state ->
+        hint = fn _result ->
+          %{
+            search_by: [voucher_ref],
+            detail: "voucher attachment response lost after commit"
+          }
+        end
+
+        run_write(
+          state,
+          :attach_voucher_report,
+          op_key,
+          hint,
+          &do_attach_voucher_report(&1, voucher_ref, evidence)
+        )
+      end)
+    end)
+  end
+
+  def handle_call({:get_voucher_attachment, voucher_ref}, _from, state) do
+    with_durable_snapshot(state, fn state ->
+      with_injection(state, :get_voucher_attachment, fn state ->
+        attachment =
+          case resolve_voucher(state, voucher_ref) do
+            nil ->
+              nil
+
+            %Voucher{external_voucher_number: number} ->
+              Map.get(state.voucher_attachments, number)
+          end
+
+        {{:ok, attachment}, state}
+      end)
     end)
   end
 
@@ -350,48 +502,63 @@ defmodule BillingCore.ERP.FakeERP do
   end
 
   def handle_call({:human_edit_draft, draft_id, fun}, _from, state) do
-    case Map.fetch(state.drafts, draft_id) do
-      :error ->
-        {:reply, {:error, {:not_found, {:draft, draft_id}}}, state}
+    with_durable_snapshot(state, fn state ->
+      case Map.fetch(state.drafts, draft_id) do
+        :error ->
+          {:reply, {:error, {:not_found, {:draft, draft_id}}}, state}
 
-      {:ok, doc} ->
-        %Document{} = edited = fun.(doc)
+        {:ok, doc} ->
+          %Document{} = edited = fun.(doc)
 
-        edited = %{
-          edited
-          | state: :draft,
-            external_draft_id: draft_id,
-            external_booked_number: nil,
-            lines: Enum.map(edited.lines, &refresh_line_fingerprint/1)
-        }
+          edited = %{
+            edited
+            | state: :draft,
+              external_draft_id: draft_id,
+              external_booked_number: nil,
+              lines: Enum.map(edited.lines, &refresh_line_fingerprint/1)
+          }
 
-        edited = %{edited | external_hash: content_hash(edited)}
+          edited = %{edited | external_hash: content_hash(edited)}
 
-        state =
-          state
-          |> Map.update!(:drafts, &Map.put(&1, draft_id, edited))
-          |> reindex_reference(doc.external_reference, edited.external_reference, {
-            :draft,
-            draft_id
-          })
+          state =
+            state
+            |> Map.update!(:drafts, &Map.put(&1, draft_id, edited))
+            |> reindex_reference(doc.external_reference, edited.external_reference, {
+              :draft,
+              draft_id
+            })
 
-        {:reply, {:ok, edited}, state}
-    end
+          case persist_after_commit(state, {:ok, edited}) do
+            {:ok, state} -> {:reply, {:ok, edited}, state}
+            {:error, state} -> {:reply, persistence_unknown([], state), state}
+          end
+      end
+    end)
   end
 
   def handle_call({:book_externally, draft_id, opts}, _from, state) do
-    case Map.fetch(state.drafts, draft_id) do
-      :error ->
-        {:reply, {:error, {:not_found, {:draft, draft_id}}}, state}
+    with_durable_snapshot(state, fn state ->
+      case Map.fetch(state.drafts, draft_id) do
+        :error ->
+          {:reply, {:error, {:not_found, {:draft, draft_id}}}, state}
 
-      {:ok, _doc} ->
-        deliver? = Keyword.get(opts, :webhook, :deliver) == :deliver
+        {:ok, _doc} ->
+          deliver? = Keyword.get(opts, :webhook, :deliver) == :deliver
 
-        {{:ok, booked}, state} =
-          book_draft(state, draft_id, %{delivery_mode: :none, booked_via: :external}, deliver?)
+          {{:ok, booked}, state} =
+            book_draft(state, draft_id, %{delivery_mode: :none, booked_via: :external}, deliver?)
 
-        {:reply, {:ok, booked}, state}
-    end
+          search_by = [
+            {:external_reference, booked.external_reference},
+            {:booked, booked.external_booked_number}
+          ]
+
+          case persist_after_commit(state, {:ok, booked}) do
+            {:ok, state} -> {:reply, {:ok, booked}, state}
+            {:error, state} -> {:reply, persistence_unknown(search_by, state), state}
+          end
+      end
+    end)
   end
 
   def handle_call({:set_webhook_sink, fun}, _from, state) do
@@ -415,8 +582,21 @@ defmodule BillingCore.ERP.FakeERP do
     {:reply, drafts ++ booked, state}
   end
 
+  def handle_call(:list_finance_vouchers, _from, state) do
+    vouchers =
+      state.vouchers
+      |> Map.values()
+      |> Enum.sort_by(&String.to_integer(&1.external_voucher_number))
+
+    {:reply, vouchers, state}
+  end
+
   def handle_call({:set_preflight_checks, checks}, _from, state) do
     {:reply, :ok, %{state | preflight_checks: checks}}
+  end
+
+  def handle_call(:export_snapshot, _from, state) do
+    {:reply, {:ok, build_snapshot(state)}, state}
   end
 
   ## Injection / idempotency / unknown-outcome plumbing
@@ -453,15 +633,61 @@ defmodule BillingCore.ERP.FakeERP do
       :miss ->
         {unknown?, state} = consume_unknown(state, operation)
         {result, state} = fun.(state)
-        state = cache_result(state, op_key, result)
 
-        if unknown? do
-          {{:unknown, hint_fun.(result)}, state}
-        else
-          {result, state}
+        case persist_after_commit(state, result) do
+          {:ok, state} ->
+            state = cache_result(state, op_key, result)
+
+            if unknown? do
+              {{:unknown, hint_fun.(result)}, state}
+            else
+              {result, state}
+            end
+
+          {:error, state} ->
+            {persistence_unknown(hint_fun.(result).search_by, state), state}
         end
     end
   end
+
+  defp with_durable_snapshot(state, fun) do
+    case retry_dirty_snapshot(state) do
+      {:ok, state} -> fun.(state)
+      {:error, state} -> {:reply, snapshot_persistence_error(), state}
+    end
+  end
+
+  defp retry_dirty_snapshot(%{snapshot_dirty?: false} = state), do: {:ok, state}
+  defp retry_dirty_snapshot(state), do: persist_snapshot(state)
+
+  defp persist_after_commit(state, :ok), do: persist_snapshot(state)
+  defp persist_after_commit(state, {:ok, _value}), do: persist_snapshot(state)
+
+  defp persist_after_commit(state, _result), do: {:ok, state}
+
+  defp persist_snapshot(%{persist_snapshot: nil} = state),
+    do: {:ok, %{state | snapshot_dirty?: false}}
+
+  defp persist_snapshot(%{persist_snapshot: callback} = state) when is_function(callback, 1) do
+    try do
+      case callback.(build_snapshot(state)) do
+        :ok -> {:ok, %{state | snapshot_dirty?: false}}
+        _other -> {:error, %{state | snapshot_dirty?: true}}
+      end
+    rescue
+      _exception -> {:error, %{state | snapshot_dirty?: true}}
+    catch
+      :exit, _reason -> {:error, %{state | snapshot_dirty?: true}}
+      :throw, _reason -> {:error, %{state | snapshot_dirty?: true}}
+    end
+  end
+
+  defp persistence_unknown(search_by, _state) do
+    {:unknown, %{search_by: search_by, detail: "demo ERP snapshot persistence failed"}}
+  end
+
+  defp snapshot_persistence_error,
+    do: {:error, {:provider_failure, :snapshot_persistence_failed}}
 
   defp idempotent_replay(state, op_key) do
     case Map.fetch(state.idempotency, op_key) do
@@ -482,6 +708,11 @@ defmodule BillingCore.ERP.FakeERP do
   # Only committed outcomes are cached; errors are not replayable.
   defp cache_result(state, op_key, {:ok, _} = result) do
     entry = {result, System.monotonic_time(:millisecond)}
+    Map.update!(state, :idempotency, &Map.put(&1, op_key, entry))
+  end
+
+  defp cache_result(state, op_key, :ok) do
+    entry = {:ok, System.monotonic_time(:millisecond)}
     Map.update!(state, :idempotency, &Map.put(&1, op_key, entry))
   end
 
@@ -670,6 +901,218 @@ defmodule BillingCore.ERP.FakeERP do
       refs |> Map.delete(old_ref) |> Map.put(new_ref, target)
     end)
   end
+
+  ## Finance-voucher operations
+
+  defp do_create_voucher(state, %FinanceVoucher{} = voucher) do
+    cond do
+      not state.capabilities.supports_finance_vouchers ->
+        {{:error, {:unsupported_capability, :finance_vouchers}}, state}
+
+      true ->
+        case FinanceVoucher.validate(voucher) do
+          :ok ->
+            case Map.fetch(state.voucher_by_reference, voucher.external_reference) do
+              {:ok, number} ->
+                {{:error,
+                  {:conflict,
+                   %{
+                     reason: :duplicate_external_reference,
+                     external_reference: voucher.external_reference,
+                     existing: {:voucher, number}
+                   }}}, state}
+
+              :error ->
+                number = Integer.to_string(state.next_voucher_number)
+                normalized = normalize_voucher(voucher, number)
+
+                state =
+                  state
+                  |> Map.update!(:vouchers, &Map.put(&1, number, normalized))
+                  |> Map.update!(
+                    :voucher_by_reference,
+                    &Map.put(&1, voucher.external_reference, number)
+                  )
+                  |> Map.put(:next_voucher_number, state.next_voucher_number + 1)
+
+                {{:ok, normalized}, state}
+            end
+
+          {:error, errors} ->
+            {{:error, {:validation, errors}}, state}
+        end
+    end
+  end
+
+  defp do_attach_voucher_report(state, voucher_ref, %AttachmentEvidence{} = evidence) do
+    cond do
+      not state.capabilities.supports_voucher_attachments ->
+        {{:error, {:unsupported_capability, :voucher_attachments}}, state}
+
+      is_nil(resolve_voucher(state, voucher_ref)) ->
+        {{:error, {:not_found, voucher_ref}}, state}
+
+      true ->
+        case AttachmentEvidence.validate(evidence, require_content: true) do
+          :ok ->
+            %Voucher{external_voucher_number: number} = resolve_voucher(state, voucher_ref)
+
+            attachment = %{
+              evidence
+              | content: nil,
+                external_attachment_id: "attachment-#{number}"
+            }
+
+            state = Map.update!(state, :voucher_attachments, &Map.put(&1, number, attachment))
+            {:ok, state}
+
+          {:error, errors} ->
+            {{:error, {:validation, errors}}, state}
+        end
+    end
+  end
+
+  defp resolve_voucher(state, {:voucher, number}), do: Map.get(state.vouchers, number)
+
+  defp resolve_voucher(state, {:external_reference, reference}) do
+    case Map.get(state.voucher_by_reference, reference) do
+      nil -> nil
+      number -> Map.get(state.vouchers, number)
+    end
+  end
+
+  defp resolve_voucher(_state, _ref), do: nil
+
+  defp normalize_voucher(%FinanceVoucher{} = voucher, number) do
+    normalized = %Voucher{
+      external_voucher_number: number,
+      external_reference: voucher.external_reference,
+      accounting_date: voucher.accounting_date,
+      accounting_year_external_id: voucher.accounting_year_external_id,
+      journal_external_id: voucher.journal_external_id,
+      currency: voucher.currency,
+      lines: voucher.lines,
+      provider_extras: %{vat_neutral: voucher.vat_neutral}
+    }
+
+    %{normalized | external_hash: Canonical.hash(normalized)}
+  end
+
+  ## Durable snapshot
+
+  @snapshot_format_version 1
+  @durable_snapshot_keys [
+    :capabilities,
+    :preflight_checks,
+    :drafts,
+    :booked,
+    :by_reference,
+    :next_draft_id,
+    :next_booked_number,
+    :vouchers,
+    :voucher_by_reference,
+    :voucher_attachments,
+    :next_voucher_number
+  ]
+
+  defp build_snapshot(state) do
+    payload = state |> durable_payload() |> :erlang.term_to_binary()
+
+    %{
+      format_version: @snapshot_format_version,
+      payload: payload,
+      sha256: snapshot_sha256(payload)
+    }
+  end
+
+  defp durable_payload(state), do: Map.take(state, @durable_snapshot_keys)
+
+  defp restore_snapshot(state, snapshot) do
+    with {:ok, durable} <- decode_valid_snapshot(snapshot) do
+      {:ok, Map.merge(state, durable)}
+    else
+      {:error, reason} -> {:stop, {:invalid_snapshot, reason}}
+    end
+  end
+
+  defp validate_snapshot(snapshot) do
+    case decode_valid_snapshot(snapshot) do
+      {:ok, _durable} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_start_snapshot(nil), do: :ok
+
+  defp validate_start_snapshot(snapshot) do
+    case validate_snapshot(snapshot) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:invalid_snapshot, reason}}
+    end
+  end
+
+  defp validate_persist_callback(nil), do: :ok
+  defp validate_persist_callback(callback) when is_function(callback, 1), do: :ok
+  defp validate_persist_callback(_callback), do: {:error, :invalid_persist_snapshot_callback}
+
+  defp decode_valid_snapshot(%{
+         format_version: @snapshot_format_version,
+         payload: payload,
+         sha256: sha256
+       })
+       when is_binary(payload) and is_binary(sha256) do
+    with :ok <- validate_snapshot_hash(payload, sha256),
+         {:ok, durable} <- decode_snapshot(payload),
+         :ok <- validate_durable_snapshot(durable) do
+      {:ok, durable}
+    end
+  end
+
+  defp decode_valid_snapshot(%{format_version: version}) when is_integer(version),
+    do: {:error, {:unsupported_format_version, version}}
+
+  defp decode_valid_snapshot(_snapshot), do: {:error, :malformed_snapshot}
+
+  defp validate_snapshot_hash(payload, hash) do
+    cond do
+      byte_size(hash) != 64 -> {:error, :invalid_sha256}
+      hash != String.downcase(hash) -> {:error, :invalid_sha256}
+      hash != snapshot_sha256(payload) -> {:error, :sha256_mismatch}
+      true -> :ok
+    end
+  end
+
+  defp decode_snapshot(payload) do
+    try do
+      {:ok, :erlang.binary_to_term(payload, [:safe])}
+    rescue
+      ArgumentError -> {:error, :invalid_payload}
+    end
+  end
+
+  defp validate_durable_snapshot(payload) when is_map(payload) do
+    missing = Enum.reject(@durable_snapshot_keys, &Map.has_key?(payload, &1))
+
+    if missing == [] and valid_durable_values?(payload) do
+      :ok
+    else
+      {:error, :invalid_payload}
+    end
+  end
+
+  defp validate_durable_snapshot(_payload), do: {:error, :invalid_payload}
+
+  defp valid_durable_values?(payload) do
+    is_map(payload.capabilities) and is_list(payload.preflight_checks) and is_map(payload.drafts) and
+      is_map(payload.booked) and is_map(payload.by_reference) and
+      is_integer(payload.next_draft_id) and payload.next_draft_id > 0 and
+      is_integer(payload.next_booked_number) and payload.next_booked_number > 0 and
+      is_map(payload.vouchers) and is_map(payload.voucher_by_reference) and
+      is_map(payload.voucher_attachments) and is_integer(payload.next_voucher_number) and
+      payload.next_voucher_number > 0
+  end
+
+  defp snapshot_sha256(payload), do: :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
 
   ## Normalization
 

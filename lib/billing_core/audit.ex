@@ -13,6 +13,8 @@ defmodule BillingCore.Audit do
     @moduledoc false
     use Ecto.Schema
 
+    @type t :: %__MODULE__{}
+
     @schema_prefix "billing"
     @primary_key {:id, Ecto.UUID, autogenerate: true}
     schema "audit_log" do

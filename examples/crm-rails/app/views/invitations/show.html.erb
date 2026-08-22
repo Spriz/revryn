@@ -1,0 +1,13 @@
+<h1>Join <%= @invitation.organization.name %></h1>
+<% if @invitation.pending? %>
+  <p>You were invited as <strong><%= @invitation.role %></strong> (<%= @invitation.email %>).</p>
+  <% if current_user %>
+    <%= form_with url: accept_invitation_path(@invitation.token), method: :post, html: { id: "accept-invitation-form" } do %>
+      <button id="accept-invitation">Accept invitation</button>
+    <% end %>
+  <% else %>
+    <p><a href="<%= register_path %>">Create an account</a> or <a href="<%= login_path %>">sign in</a> with <%= @invitation.email %> first, then reopen this link.</p>
+  <% end %>
+<% else %>
+  <p id="invitation-settled">This invitation is no longer active.</p>
+<% end %>

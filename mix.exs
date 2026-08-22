@@ -11,7 +11,12 @@ defmodule BillingCore.MixProject do
       aliases: aliases(),
       deps: deps(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
-      listeners: [Phoenix.CodeReloader]
+      listeners: [Phoenix.CodeReloader],
+      dialyzer: [
+        plt_add_apps: [:mix, :ex_unit],
+        plt_core_path: "priv/plts",
+        plt_local_path: "priv/plts"
+      ]
     ]
   end
 
@@ -76,6 +81,7 @@ defmodule BillingCore.MixProject do
       {:decimal, "~> 3.0"},
       {:stream_data, "~> 1.1", only: [:dev, :test]},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:logger_json, "~> 7.0"},
       {:wax_, "~> 0.7"},
       {:nimble_totp, "~> 1.0"},
@@ -109,7 +115,13 @@ defmodule BillingCore.MixProject do
         "esbuild billing_core --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "dialyzer",
+        "test"
+      ]
     ]
   end
 end

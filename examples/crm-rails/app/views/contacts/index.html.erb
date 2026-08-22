@@ -1,0 +1,28 @@
+<h1><%= @current_organization.name %> · Contacts</h1>
+<p><a href="<%= organization_path(@current_organization.slug) %>">&larr; Back</a>
+   · <a id="export-csv" href="<%= organization_contacts_path(@current_organization.slug, format: :csv) %>">Export CSV</a></p>
+<%= form_with url: organization_contacts_path(@current_organization.slug), method: :post, html: { id: "new-contact-form", class: "card inlineform" } do %>
+  <input name="full_name" placeholder="Full name" required>
+  <input name="email" type="email" placeholder="email">
+  <input name="phone" placeholder="phone">
+  <input name="title" placeholder="title">
+  <select name="company_id"><option value="">No company</option>
+    <% @current_organization.companies.order(:name).each do |company| %>
+      <option value="<%= company.id %>"><%= company.name %></option>
+    <% end %>
+  </select>
+  <button id="create-contact-submit">Add contact</button>
+<% end %>
+<%= form_with url: import_organization_contacts_path(@current_organization.slug), method: :post, html: { id: "import-form", class: "card inlineform", multipart: true } do %>
+  <input type="file" name="file" accept=".csv" required>
+  <button id="import-submit">Import CSV</button>
+<% end %>
+<table class="table" id="contact-list">
+  <thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Title</th></tr></thead>
+  <tbody>
+    <% @contacts.each do |contact| %>
+      <tr><td><a href="<%= organization_contact_path(@current_organization.slug, contact.id) %>"><%= contact.full_name %></a></td>
+          <td><%= contact.email %></td><td><%= contact.company&.name %></td><td><%= contact.title %></td></tr>
+    <% end %>
+  </tbody>
+</table>

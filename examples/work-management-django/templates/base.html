@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Driftbord{% endblock %}</title>
+  {% load static %}
+  <link rel="stylesheet" href="{% static 'driftbord.css' %}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">Driftbord</a>
+  <nav>
+    {% if user.is_authenticated %}
+      <a id="nav-notifications" href="{% url 'notifications' %}">Notifications</a>
+      <form method="post" action="{% url 'logout' %}" class="inline">{% csrf_token %}
+        <button class="linklike" id="nav-logout">Sign out ({{ user.email }})</button>
+      </form>
+    {% else %}
+      <a href="{% url 'login' %}">Sign in</a>
+      <a href="{% url 'register' %}">Register</a>
+    {% endif %}
+  </nav>
+</header>
+{% if messages %}<ul class="flashes" id="flashes">{% for message in messages %}<li class="{{ message.tags }}">{{ message }}</li>{% endfor %}</ul>{% endif %}
+<main>{% block content %}{% endblock %}</main>
+</body>
+</html>

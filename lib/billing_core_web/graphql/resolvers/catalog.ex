@@ -262,7 +262,21 @@ defmodule BillingCoreWeb.GraphQL.Resolvers.Catalog do
       {:ok, value} -> {:ok, value}
       {:error, :unauthorized} -> Errors.unauthorized()
       {:error, :not_found} -> Errors.not_found()
-      {:error, _other} -> Errors.not_found()
+    end
+  end
+
+  def map_product_to_erp(_parent, %{input: input}, %{context: %{scope: scope}}) do
+    cmid = input.client_mutation_id
+
+    with {:ok, product} <- Catalog.fetch_product(scope, input.product_id),
+         {:ok, mapping} <-
+           Catalog.upsert_product_erp_mapping(scope, product, %{
+             erp_connection_id: input.erp_connection_id,
+             external_product_number: input.external_product_number
+           }) do
+      {:ok, %{mapping: mapping, client_mutation_id: cmid}}
+    else
+      {:error, reason} -> {:ok, Errors.business_error(reason, cmid)}
     end
   end
 

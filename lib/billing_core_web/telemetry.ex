@@ -75,6 +75,20 @@ defmodule BillingCoreWeb.Telemetry do
           "The time the connection spent waiting before being checked out for the query"
       ),
 
+      # Demo activation evidence (BC-US-166): time from workspace start to
+      # each guided journey proof — most importantly the first reconciled
+      # invoice and the first accepted customer-credit close.
+      summary("billing_core.demo.step_completed.seconds_since_start",
+        tags: [:step],
+        unit: :second,
+        description: "Seconds from demo-workspace start to a journey step's first completion"
+      ),
+
+      # Customer-credit close outcomes (SPEC §17.16 observability).
+      counter("billing_core.customer_credit_close.calculated.count", tags: [:currency, :result]),
+      counter("billing_core.customer_credit_close.reconciled.count", tags: [:currency]),
+      counter("billing_core.customer_credit_close.mismatch.count", tags: [:currency, :reason]),
+
       # VM Metrics
       summary("vm.memory.total", unit: {:byte, :kilobyte}),
       summary("vm.total_run_queue_lengths.total"),

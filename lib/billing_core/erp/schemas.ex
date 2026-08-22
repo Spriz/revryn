@@ -2,6 +2,8 @@ defmodule BillingCore.ERP.Connection do
   @moduledoc "ERP connection (SPEC §13.3 `erp_connections`, BC-US-003)."
   use Ecto.Schema
 
+  @type t :: %__MODULE__{}
+
   @schema_prefix "billing"
   @primary_key {:id, Ecto.UUID, autogenerate: true}
   @timestamps_opts [type: :utc_datetime_usec, inserted_at: :created_at]
@@ -25,6 +27,8 @@ defmodule BillingCore.ERP.ErpDocument do
   @moduledoc "External ERP document mirror (SPEC §13.3 `erp_documents`)."
   use Ecto.Schema
 
+  @type t :: %__MODULE__{}
+
   @schema_prefix "billing"
   @primary_key {:id, Ecto.UUID, autogenerate: true}
   @timestamps_opts [type: :utc_datetime_usec, inserted_at: :created_at]
@@ -32,10 +36,13 @@ defmodule BillingCore.ERP.ErpDocument do
     field :team_id, Ecto.UUID
     field :erp_connection_id, Ecto.UUID
     field :invoice_intent_id, Ecto.UUID
+    field :customer_credit_close_id, Ecto.UUID
     field :document_type, :string, default: "invoice"
     field :state, :string, default: "pending"
     field :external_draft_number, :string
     field :external_booked_number, :string
+    field :external_voucher_number, :string
+    field :external_accounting_year, :string
     field :external_reference, :string
     field :last_external_snapshot, :map
     field :last_external_hash, :string
@@ -48,6 +55,8 @@ end
 defmodule BillingCore.ERP.SyncOperation do
   @moduledoc "ERP write/read evidence linked to a durable operation (SPEC §13.3)."
   use Ecto.Schema
+
+  @type t :: %__MODULE__{}
 
   @schema_prefix "billing"
   @primary_key {:id, Ecto.UUID, autogenerate: true}
@@ -92,6 +101,8 @@ end
 defmodule BillingCore.ERP.ApprovalRecord do
   @moduledoc "Append-only approval evidence (SPEC §13.3, BC-US-084)."
   use Ecto.Schema
+
+  @type t :: %__MODULE__{}
 
   @schema_prefix "billing"
   @primary_key {:id, Ecto.UUID, autogenerate: true}

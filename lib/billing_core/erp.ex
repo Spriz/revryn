@@ -176,12 +176,31 @@ defmodule BillingCore.ERP do
     base = %{
       connection_id: connection.id,
       team_id: connection.team_id,
-      provider: String.to_existing_atom(connection.provider)
+      provider: provider_atom(connection.provider)
     }
 
     case connection.provider do
       "fake" ->
-        Map.merge(base, Application.get_env(:billing_core, :fake_erp_context, %{}))
+        case Application.get_env(:billing_core, :fake_erp_context, %{}) do
+          %{fake_server: _server} = test_context ->
+            Map.merge(base, test_context)
+
+          _no_test_override ->
+            resolver =
+              Application.get_env(
+                :billing_core,
+                :fake_erp_context_resolver,
+                BillingCore.Demo.FakeERPInstances
+              )
+
+            case resolver.context_for(connection) do
+              {:ok, demo_context} ->
+                Map.merge(base, demo_context)
+
+              {:error, reason} ->
+                raise "fake ERP context is unavailable for connection #{connection.id}: #{inspect(reason)}"
+            end
+        end
 
       "economic" ->
         credentials = resolve_secret(connection.secret_reference)
@@ -198,6 +217,9 @@ defmodule BillingCore.ERP do
 
     provider.resolve!(reference)
   end
+
+  defp provider_atom("fake"), do: :fake_erp
+  defp provider_atom("economic"), do: :economic
 
   defp stringify(term) do
     term |> Canonical.encode!() |> Jason.decode!()

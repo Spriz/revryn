@@ -16,7 +16,7 @@ defmodule BillingCoreWeb.GraphQL.Schema do
 
   use Absinthe.Schema
 
-  alias BillingCoreWeb.GraphQL.{Middleware, Pagination, Resolvers}
+  alias BillingCoreWeb.GraphQL.{CreditCloses, Middleware, Pagination, Resolvers}
 
   import_types(BillingCoreWeb.GraphQL.Scalars)
   import_types(BillingCoreWeb.GraphQL.Types)
@@ -25,6 +25,10 @@ defmodule BillingCoreWeb.GraphQL.Schema do
   import_types(BillingCoreWeb.GraphQL.Types.Billing)
   import_types(BillingCoreWeb.GraphQL.Types.Erp)
   import_types(BillingCoreWeb.GraphQL.Types.Usage)
+  import_types(BillingCoreWeb.GraphQL.Types.Credits)
+  import_types(BillingCoreWeb.GraphQL.CreditCloses.Types)
+  import_types(BillingCoreWeb.GraphQL.Audit.Types)
+  import_types(BillingCoreWeb.GraphQL.Organizations.Types)
 
   def middleware(middleware, _field, _object) do
     Enum.map(middleware, fn
@@ -213,6 +217,77 @@ defmodule BillingCoreWeb.GraphQL.Schema do
       middleware(Middleware.RequireScope, mode: :query)
       resolve(&Resolvers.Erp.operation/3)
     end
+
+    @desc "Pending and settled membership invitations of an organization (BC-US-144)."
+    field :organization_invitations, non_null(list_of(non_null(:organization_invitation))) do
+      arg(:organization_id, non_null(:id))
+      middleware(Middleware.RequireScope, mode: :query)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.organization_invitations/3)
+    end
+
+    @desc "Active membership directory of an organization (owners/admins)."
+    field :organization_memberships,
+          non_null(list_of(non_null(:organization_membership_record))) do
+      arg(:organization_id, non_null(:id))
+      middleware(Middleware.RequireScope, mode: :query)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.organization_memberships/3)
+    end
+
+    @desc "Active membership directory of a team (any team member)."
+    field :team_memberships, non_null(list_of(non_null(:team_membership_record))) do
+      arg(:team_id, non_null(:id))
+      middleware(Middleware.RequireScope, mode: :query)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.team_memberships/3)
+    end
+
+    @desc "Audit package for an invoice chain: canonical evidence files + checksum manifest (BC-US-114)."
+    field :audit_export, :audit_export do
+      arg(:team_id, non_null(:id))
+      arg(:invoice_intent_id, non_null(:id))
+      middleware(Middleware.RequireScope, mode: :query)
+      resolve(&BillingCoreWeb.GraphQL.Audit.Resolvers.audit_export/3)
+    end
+
+    @desc "Credit accounts linked to a customer, with subledger evidence (BC-US-107)."
+    field :credit_accounts, non_null(list_of(non_null(:credit_account))) do
+      arg(:team_id, non_null(:id))
+      arg(:customer_id, non_null(:id))
+      middleware(Middleware.RequireScope, mode: :query)
+      resolve(&Resolvers.Credits.credit_accounts/3)
+    end
+
+    @desc "One monthly customer-credit close (BC-US-163…165)."
+    field :credit_close, :credit_close do
+      arg(:team_id, non_null(:id))
+      arg(:id, non_null(:id))
+      middleware(Middleware.RequireScope, mode: :query)
+      resolve(&CreditCloses.Resolvers.credit_close/3)
+    end
+
+    @desc "The team's monthly customer-credit closes, newest period first (max 100)."
+    field :credit_closes, non_null(list_of(non_null(:credit_close))) do
+      arg(:team_id, non_null(:id))
+      arg(:currency, :string)
+      arg(:state, :string)
+      middleware(Middleware.RequireScope, mode: :query)
+      resolve(&CreditCloses.Resolvers.credit_closes/3)
+    end
+
+    @desc "The team's close posting-policy versions, newest first."
+    field :credit_close_policies, non_null(list_of(non_null(:credit_close_policy))) do
+      arg(:team_id, non_null(:id))
+      middleware(Middleware.RequireScope, mode: :query)
+      resolve(&CreditCloses.Resolvers.credit_close_policies/3)
+    end
+
+    @desc "Receivable settlements opened by credit applications (SPEC §9.4.1)."
+    field :credit_settlements, non_null(list_of(non_null(:credit_settlement))) do
+      arg(:team_id, non_null(:id))
+      arg(:invoice_intent_id, :id)
+      arg(:state, :string)
+      middleware(Middleware.RequireScope, mode: :query)
+      resolve(&CreditCloses.Resolvers.credit_settlements/3)
+    end
   end
 
   mutation do
@@ -262,6 +337,13 @@ defmodule BillingCoreWeb.GraphQL.Schema do
       arg(:input, non_null(:map_customer_to_erp_input))
       middleware(Middleware.RequireScope, mode: :mutation)
       resolve(&Resolvers.Contracts.map_customer_to_erp/3)
+    end
+
+    @desc "Maps a product to an ERP product number (BC-US-011)."
+    field :map_product_to_erp, non_null(:map_product_to_erp_result) do
+      arg(:input, non_null(:map_product_to_erp_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&Resolvers.Catalog.map_product_to_erp/3)
     end
 
     @desc "Creates a product with its version 1 snapshot (BC-US-010)."
@@ -381,6 +463,133 @@ defmodule BillingCoreWeb.GraphQL.Schema do
       arg(:input, non_null(:retry_operation_input))
       middleware(Middleware.RequireScope, mode: :mutation)
       resolve(&Resolvers.Erp.retry_operation/3)
+    end
+
+    @desc "Invites an email to organization/team memberships (BC-US-144)."
+    field :invite_organization_member, non_null(:invite_organization_member_result) do
+      arg(:input, non_null(:invite_organization_member_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.invite_organization_member/3)
+    end
+
+    @desc "Revokes a pending membership invitation (BC-US-144)."
+    field :revoke_organization_invitation, non_null(:revoke_organization_invitation_result) do
+      arg(:input, non_null(:revoke_organization_invitation_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.revoke_organization_invitation/3)
+    end
+
+    @desc "Replaces a member's organization roles; the last owner is protected (owners/admins)."
+    field :change_organization_roles, non_null(:change_organization_roles_result) do
+      arg(:input, non_null(:change_organization_roles_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.change_organization_roles/3)
+    end
+
+    @desc "Adds an existing organization member to a team (team admins, INV-024)."
+    field :add_team_member, non_null(:add_team_member_result) do
+      arg(:input, non_null(:add_team_member_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.add_team_member/3)
+    end
+
+    @desc "Replaces a team member's role grants (team admins)."
+    field :change_team_roles, non_null(:change_team_roles_result) do
+      arg(:input, non_null(:change_team_roles_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.change_team_roles/3)
+    end
+
+    @desc "Removes a member from a team; the history row is retained (team admins)."
+    field :remove_team_member, non_null(:remove_team_member_result) do
+      arg(:input, non_null(:remove_team_member_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.remove_team_member/3)
+    end
+
+    @desc "Renames a team; UUID and slug stay stable (team admins, BC-US-140)."
+    field :rename_team, non_null(:rename_team_result) do
+      arg(:input, non_null(:rename_team_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.rename_team/3)
+    end
+
+    @desc "Archives a team; the last active team is protected (owners/admins, INV-033)."
+    field :archive_team, non_null(:archive_team_result) do
+      arg(:input, non_null(:archive_team_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&BillingCoreWeb.GraphQL.Organizations.Resolvers.archive_team/3)
+    end
+
+    @desc "Grants customer credit into the subledger — a liability, never a discount (BC-US-107)."
+    field :grant_credit, non_null(:grant_credit_result) do
+      arg(:input, non_null(:grant_credit_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&Resolvers.Credits.grant_credit/3)
+    end
+
+    @desc "Sets the versioned remaining-credit disposition policy (BC-US-109)."
+    field :set_credit_disposition_policy, non_null(:set_credit_disposition_policy_result) do
+      arg(:input, non_null(:set_credit_disposition_policy_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&Resolvers.Credits.set_disposition_policy/3)
+    end
+
+    @desc "Creates a monthly-close posting-policy version (BC-US-163)."
+    field :create_credit_close_policy, non_null(:create_credit_close_policy_result) do
+      arg(:input, non_null(:create_credit_close_policy_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&CreditCloses.Resolvers.create_credit_close_policy/3)
+    end
+
+    @desc "Freezes one deterministic close for a currency and calendar month (BC-US-163)."
+    field :generate_credit_close, non_null(:generate_credit_close_result) do
+      arg(:input, non_null(:generate_credit_close_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&CreditCloses.Resolvers.generate_credit_close/3)
+    end
+
+    @desc "Approves the exact frozen report hash for ERP posting (BC-US-164)."
+    field :approve_credit_close, non_null(:approve_credit_close_result) do
+      arg(:input, non_null(:approve_credit_close_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&CreditCloses.Resolvers.approve_credit_close/3)
+    end
+
+    @desc "Creates the durable, idempotent ERP posting operation (BC-US-164)."
+    field :request_credit_close_posting, non_null(:request_credit_close_posting_result) do
+      arg(:input, non_null(:request_credit_close_posting_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&CreditCloses.Resolvers.request_credit_close_posting/3)
+    end
+
+    @desc "Accepts a fully reconciled close as the authoritative period close (BC-US-165)."
+    field :close_credit_period, non_null(:close_credit_period_result) do
+      arg(:input, non_null(:close_credit_period_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&CreditCloses.Resolvers.close_credit_period/3)
+    end
+
+    @desc "Freezes a compensating reversal close for an accepted close (ADR-031, BC-US-165)."
+    field :request_credit_close_reversal, non_null(:request_credit_close_reversal_result) do
+      arg(:input, non_null(:request_credit_close_reversal_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&CreditCloses.Resolvers.request_credit_close_reversal/3)
+    end
+
+    @desc "Freezes a replacement close for a reversed period under a corrected policy (ADR-031)."
+    field :generate_credit_close_replacement,
+          non_null(:generate_credit_close_replacement_result) do
+      arg(:input, non_null(:generate_credit_close_replacement_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&CreditCloses.Resolvers.generate_credit_close_replacement/3)
+    end
+
+    @desc "Records the external receivables system's settlement reference exactly once (SPEC §9.4.1)."
+    field :record_external_settlement, non_null(:record_external_settlement_result) do
+      arg(:input, non_null(:record_external_settlement_input))
+      middleware(Middleware.RequireScope, mode: :mutation)
+      resolve(&CreditCloses.Resolvers.record_external_settlement/3)
     end
   end
 end

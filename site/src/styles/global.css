@@ -1,0 +1,333 @@
+/* Revryn marketing site — deliberate dark, engineering-forward look. */
+
+:root {
+  --bg: #0b0e14;
+  --bg-raised: #11151f;
+  --bg-inset: #0d111a;
+  --border: #1e2532;
+  --border-strong: #2c3547;
+  --text: #e6ebf4;
+  --text-dim: #9aa7bd;
+  --text-faint: #67748c;
+  --accent: #4fd6be;
+  --accent-dim: #2b8a79;
+  --accent-ink: #062019;
+  --amber: #e8b45a;
+  --red: #e06c75;
+  --blue: #6ca4f5;
+  --mono: "Berkeley Mono", ui-monospace, "SFMono-Regular", "JetBrains Mono",
+    Menlo, Consolas, monospace;
+  --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
+  --max: 72rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent-dim);
+  color: var(--text);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--mono);
+  font-size: 0.875em;
+}
+
+code {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+pre {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+.wrap {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+/* --- Header --- */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.site-header .wrap {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  height: 3.75rem;
+}
+.brand {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.brand:hover {
+  text-decoration: none;
+}
+.brand .tld {
+  color: var(--accent);
+}
+.site-nav {
+  display: flex;
+  gap: 1.4rem;
+  margin-left: auto;
+  align-items: center;
+}
+.site-nav a {
+  color: var(--text-dim);
+  font-size: 0.925rem;
+  transition: color 120ms ease;
+}
+.site-nav a:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+.site-nav a.gh {
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0.35rem 0.8rem;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+.site-nav a.gh:hover {
+  border-color: var(--accent-dim);
+  background: var(--bg-raised);
+}
+
+/* --- Footer --- */
+.site-footer {
+  border-top: 1px solid var(--border);
+  margin-top: 6rem;
+  padding: 2.5rem 0 3rem;
+  color: var(--text-faint);
+  font-size: 0.875rem;
+}
+.site-footer .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2.5rem;
+}
+.site-footer a {
+  color: var(--text-dim);
+}
+
+/* --- Shared page elements --- */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 0.75rem;
+}
+
+.badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  border-radius: 999px;
+  padding: 0.12rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  vertical-align: middle;
+}
+.badge.supported {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+.badge.experimental {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+}
+
+.btn {
+  display: inline-block;
+  border-radius: 10px;
+  padding: 0.65rem 1.3rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border: 1px solid transparent;
+  transition:
+    transform 120ms ease,
+    box-shadow 120ms ease,
+    background 120ms ease,
+    border-color 120ms ease;
+}
+.btn:hover {
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+.btn.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.btn.primary:hover {
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.btn.secondary {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.btn.secondary:hover {
+  border-color: var(--accent-dim);
+  background: var(--bg-raised);
+}
+
+/* --- Cards --- */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
+  gap: 1rem;
+}
+.card {
+  display: block;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem 1.4rem;
+  color: var(--text);
+  transition:
+    border-color 140ms ease,
+    transform 140ms ease;
+}
+.card:hover {
+  border-color: var(--accent-dim);
+  transform: translateY(-2px);
+  text-decoration: none;
+}
+.card h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1.02rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.card p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+/* --- Prose (rendered markdown) --- */
+.prose {
+  max-width: 46rem;
+}
+.prose h1 {
+  font-size: 2rem;
+  line-height: 1.2;
+  margin: 0 0 1rem;
+  letter-spacing: -0.01em;
+}
+.prose h2 {
+  font-size: 1.35rem;
+  margin: 2.5rem 0 0.75rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+  letter-spacing: -0.005em;
+}
+.prose h3 {
+  font-size: 1.08rem;
+  margin: 1.75rem 0 0.5rem;
+}
+.prose p,
+.prose li {
+  color: var(--text-dim);
+}
+.prose li {
+  margin: 0.3rem 0;
+}
+.prose strong {
+  color: var(--text);
+}
+.prose table {
+  border-collapse: collapse;
+  width: 100%;
+  display: block;
+  overflow-x: auto;
+  font-size: 0.9rem;
+}
+.prose th,
+.prose td {
+  border: 1px solid var(--border);
+  padding: 0.45rem 0.75rem;
+  text-align: left;
+}
+.prose th {
+  background: var(--bg-raised);
+  color: var(--text);
+}
+.prose td {
+  color: var(--text-dim);
+}
+.prose blockquote {
+  margin: 1rem 0;
+  padding: 0.25rem 1.25rem;
+  border-left: 3px solid var(--accent-dim);
+  background: var(--bg-raised);
+  border-radius: 0 8px 8px 0;
+}
+
+@media (max-width: 640px) {
+  .site-nav {
+    gap: 0.9rem;
+  }
+  .site-nav a:not(.gh):not(.keep) {
+    display: none;
+  }
+}

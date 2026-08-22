@@ -1,4 +1,4 @@
-# Billing Core
+# Revryn
 
 An accrual-aware, open-source billing core for B2B SaaS: it owns pricing
 calculation, deterministic invoice intent, and idempotent synchronization to
@@ -50,11 +50,12 @@ the ERP, then reconciles what the ERP actually recorded.
 - **Interfaces** — GraphQL API (`/graphql`) with typed mutation results,
   idempotency, and scope-checked resolvers; Phoenix LiveView surfaces;
   health endpoints; append-only audit log and transactional outbox.
-- **`billingctl`** — cross-platform Go CLI over the GraphQL contract with
+- **`revryn`** — cross-platform Go CLI over the GraphQL contract with
   stable `--json` envelopes, a registered exit-code taxonomy, retry/backoff,
-  and correlation IDs; plus `billingctl mcp serve`, an MCP server exposing
+  and correlation IDs; plus `revryn mcp serve`, an MCP server exposing
   14 semantic billing tools (read-only + confirm-gated mutations — never
-  arbitrary GraphQL/SQL). Build: `CGO_ENABLED=0 go build ./cmd/billingctl`.
+  arbitrary GraphQL/SQL). Build from `clients/revryn/` with
+  `CGO_ENABLED=0 go build ./cmd/revryn`.
 
 ## Getting started (development)
 
@@ -90,10 +91,18 @@ restores it into a disposable database and passes integrity checks
 
 ## Repository layout
 
-Per SPEC §24.1: domain contexts in `lib/billing_core/`, web/GraphQL in
-`lib/billing_core_web/`, workflow tests as documentation in
-`test/workflows/`, Playwright in `e2e/`, feature docs in `docs/features/`,
-ADRs in `docs/adr/`.
+Per SPEC §24.1: the Phoenix modular monolith stays at the repository root,
+with domain contexts in `lib/billing_core/`, web/GraphQL in
+`lib/billing_core_web/`, workflow tests in `test/workflows/`, Playwright in
+`e2e/`, feature docs in `docs/features/`, generated lifecycle diagrams in
+[`docs/architecture/state-machines.md`](docs/architecture/state-machines.md),
+and ADRs in `docs/adr/`. The Go CLI/MCP companion is an isolated module
+under [`clients/revryn/`](clients/revryn/README.md). Secrets live
+age-encrypted in the committed [`fnox.toml`](fnox.toml)
+([runbook](docs/runbooks/secrets.md)). The marketing/documentation site is
+an Astro project under [`site/`](site/), deployed to GitHub Pages by
+`.github/workflows/site.yml`; it renders the `public: true` feature docs
+and a GraphQL reference generated from `schema/billing_core.graphql`.
 
 ## License
 

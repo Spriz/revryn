@@ -86,17 +86,20 @@ defmodule BillingCoreWeb.DomainComponents do
   end
 
   defp badge_color(state)
-       when state in ~w(active succeeded erp_booked booked published valid approved closed),
+       when state in ~w(active succeeded erp_booked booked published valid approved closed
+                       reconciled posted),
        do: "badge-success"
 
   defp badge_color(state)
        when state in ~w(pending sync_pending booking_pending scheduled queued executing
                        retry_scheduled reconciling paused pending_cancellation draft
-                       unvalidated outcome_unknown syncing credit_required action_required warn),
+                       unvalidated outcome_unknown syncing credit_required action_required warn
+                       posting calculating reversal_pending),
        do: "badge-warning"
 
   defp badge_color(state)
-       when state in ~w(failed sync_error blocked cancelled invalid reconciliation_failed fail),
+       when state in ~w(failed sync_error blocked cancelled invalid reconciliation_failed fail
+                       mismatch),
        do: "badge-error"
 
   defp badge_color(state) when state in ~w(frozen erp_draft open ready pass awaiting_approval),
@@ -171,7 +174,9 @@ defmodule BillingCoreWeb.DomainComponents do
       {:catalog, "Catalog", ~p"/teams/#{team.id}/catalog"},
       {:subscriptions, "Subscriptions", ~p"/teams/#{team.id}/subscriptions"},
       {:billing_runs, "Billing runs", ~p"/teams/#{team.id}/billing-runs"},
+      {:credit_closes, "Credit closes", ~p"/teams/#{team.id}/credit-closes"},
       {:operations, "Operations", ~p"/teams/#{team.id}/operations"},
+      {:members, "Members", ~p"/teams/#{team.id}/members"},
       {:settings, "Settings", ~p"/teams/#{team.id}/settings"}
     ]
   end

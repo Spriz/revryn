@@ -1,0 +1,7 @@
+{
+  "name": "showcase-integrated-crm",
+  "private": true,
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

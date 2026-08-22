@@ -21,6 +21,7 @@ defmodule BillingCore.ERP.Adapter do
   """
 
   alias BillingCore.ERP.{CanonicalInvoice, Document}
+  alias BillingCore.ERP.Vouchers.{AttachmentEvidence, FinanceVoucher, Voucher}
 
   @type connection_context :: %{
           required(:connection_id) => Ecto.UUID.t(),
@@ -37,6 +38,9 @@ defmodule BillingCore.ERP.Adapter do
           supports_invoice_webhooks: boolean(),
           supports_line_accrual_periods: boolean(),
           supports_customer_provisioning: boolean(),
+          supports_customer_credit_settlements: boolean(),
+          supports_finance_vouchers: boolean(),
+          supports_voucher_attachments: boolean(),
           supported_delivery_modes: [:none | :email | :einvoice],
           amount_scale: non_neg_integer(),
           quantity_scale: non_neg_integer()
@@ -51,6 +55,10 @@ defmodule BillingCore.ERP.Adapter do
   @type document_ref ::
           {:draft, String.t()}
           | {:booked, String.t()}
+          | {:external_reference, external_reference()}
+
+  @type voucher_ref ::
+          {:voucher, String.t()}
           | {:external_reference, external_reference()}
 
   @type preflight_input :: %{
@@ -120,4 +128,23 @@ defmodule BillingCore.ERP.Adapter do
               booking_options(),
               operation_key()
             ) :: {:ok, Document.t()} | {:unknown, recovery_hint()} | {:error, error()}
+
+  @callback find_finance_voucher(connection_context(), external_reference()) ::
+              {:ok, Voucher.t() | nil} | {:error, error()}
+
+  @callback create_finance_voucher(connection_context(), FinanceVoucher.t(), operation_key()) ::
+              {:ok, Voucher.t()} | {:unknown, recovery_hint()} | {:error, error()}
+
+  @callback get_finance_voucher(connection_context(), voucher_ref()) ::
+              {:ok, Voucher.t() | nil} | {:error, error()}
+
+  @callback attach_voucher_report(
+              connection_context(),
+              voucher_ref(),
+              AttachmentEvidence.t(),
+              operation_key()
+            ) :: :ok | {:unknown, recovery_hint()} | {:error, error()}
+
+  @callback get_voucher_attachment(connection_context(), voucher_ref()) ::
+              {:ok, AttachmentEvidence.t() | nil} | {:error, error()}
 end

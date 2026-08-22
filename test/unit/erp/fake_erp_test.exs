@@ -559,6 +559,9 @@ defmodule BillingCore.ERP.FakeERPTest do
                supports_invoice_webhooks: true,
                supports_line_accrual_periods: true,
                supports_customer_provisioning: true,
+               supports_customer_credit_settlements: false,
+               supports_finance_vouchers: true,
+               supports_voucher_attachments: true,
                supported_delivery_modes: [:none, :email],
                amount_scale: 2,
                quantity_scale: 2

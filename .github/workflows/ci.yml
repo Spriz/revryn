@@ -9,6 +9,20 @@ env:
   MIX_ENV: test
 
 jobs:
+  secrets-hygiene:
+    name: Secrets config (fnox)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: fnox
+      # Validates the committed age-encrypted secret catalog parses and its
+      # provider config is sound. Needs no age identity; add the repo secret
+      # FNOX_AGE_KEY to let workflows decrypt (docs/runbooks/secrets.md).
+      - run: fnox check
+      - run: fnox list
+
   test:
     name: Format, compile, test
     runs-on: ubuntu-latest
@@ -60,12 +74,34 @@ jobs:
         run: mix test
 
       - name: Credo static analysis
-        run: mix credo --strict || true
+        run: mix credo
+
+      - name: Cache dialyzer PLTs
+        uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: plt-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: plt-${{ runner.os }}-
+
+      - name: Dialyzer (zero warnings)
+        run: mix dialyzer
 
   e2e:
-    name: Playwright E2E
+    # SPEC 23.6: required browser suites run against the compiled production
+    # Phoenix release with built assets, not the dev server.
+    name: Playwright E2E (production release)
     runs-on: ubuntu-latest
     needs: test
+
+    env:
+      DATABASE_URL: ecto://postgres:postgres@127.0.0.1:55432/billing_core_release_e2e
+      PHX_HOST: localhost
+      PORT: "4000"
+      PHX_CHECK_ORIGIN: http://localhost:4000
+      REVRYN_DEMO_ERP_ENABLED: "true"
+      WEBAUTHN_RP_ID: localhost
+      WEBAUTHN_ORIGIN: http://localhost:4000
+      RELEASE_DISTRIBUTION: none
 
     services:
       postgres:
@@ -95,15 +131,34 @@ jobs:
           path: |
             deps
             _build
-          key: mix-dev-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          key: mix-prod-${{ runner.os }}-${{ hashFiles('mix.lock') }}
 
-      - name: Prepare app
+      - name: Build production release with built assets
         env:
-          MIX_ENV: dev
+          MIX_ENV: prod
         run: |
           mix deps.get
-          mix ecto.create --quiet
-          mix ecto.migrate --quiet
+          mix assets.deploy
+          mix release --overwrite
+
+      - name: Create database and run release migrations
+        env:
+          SECRET_KEY_BASE: ci-only-secret-key-base-0000000000000000000000000000000000000000
+        run: |
+          PGPASSWORD=postgres createdb -h 127.0.0.1 -p 55432 -U postgres billing_core_release_e2e
+          _build/prod/rel/billing_core/bin/billing_core eval "BillingCore.Release.migrate()"
+
+      - name: Boot production release
+        env:
+          SECRET_KEY_BASE: ci-only-secret-key-base-0000000000000000000000000000000000000000
+          PHX_SERVER: "true"
+        run: |
+          _build/prod/rel/billing_core/bin/billing_core daemon
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:4000/health/ready && break
+            sleep 1
+          done
+          curl -fsS http://localhost:4000/health/ready
 
       - uses: actions/setup-node@v4
         with:
@@ -115,9 +170,31 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
 
-      - name: Run E2E suite
+      - name: Run E2E suite against the release
         working-directory: e2e
+        env:
+          PW_BASE_URL: http://localhost:4000
         run: npx playwright test
+
+      - name: Set up Go for CLI/MCP certification
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: clients/revryn/go.mod
+
+      - name: CLI and MCP certification against the release (BC-TASK-100)
+        env:
+          SECRET_KEY_BASE: ci-only-secret-key-base-0000000000000000000000000000000000000000
+        run: |
+          FIXTURE_JSON="$(_build/prod/rel/billing_core/bin/billing_core eval "$(cat e2e/cli/fixture.exs)" | grep '^{' | tail -1)"
+          export FIXTURE_JSON
+          BASE_URL=http://localhost:4000 e2e/cli/run.sh
+          BASE_URL=http://localhost:4000 e2e/mcp/run.sh
+
+      - name: Collect release logs on failure
+        if: failure()
+        run: |
+          mkdir -p e2e/test-results/release-logs
+          cp -r _build/prod/rel/billing_core/tmp/log e2e/test-results/release-logs || true
 
       - name: Upload traces on failure
         if: failure()
@@ -128,8 +205,59 @@ jobs:
             e2e/test-results
             e2e/playwright-report
 
-  billingctl:
-    name: billingctl (Go)
+  image:
+    # SPEC §24.6 / BC-TASK-002: the single official image must build and the
+    # all-in-one profile must boot to a ready health check from scratch.
+    name: Official image (build, boot, smoke-test)
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the official image
+        run: docker build -f deploy/container/Dockerfile -t billing-core:ci .
+
+      - name: Boot the all-in-one profile
+        run: |
+          docker run -d --name billing-core \
+            --tmpfs /data:rw,exec,size=1024m \
+            -e SECRET_KEY_BASE=ci-only-secret-key-base-0000000000000000000000000000000000000000 \
+            -e PHX_SERVER=true \
+            -e PHX_HOST=localhost \
+            -e PORT=4000 \
+            -p 4000:4000 \
+            billing-core:ci all-in-one
+          for i in $(seq 1 90); do
+            curl -fsS http://localhost:4000/health/ready >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://localhost:4000/health/ready
+
+      - name: Run the image's own smoke-test profile
+        run: docker exec billing-core billing-core smoke-test
+
+      - name: Run the image's doctor profile
+        run: docker exec billing-core billing-core doctor
+
+      - name: Backup → restore → verify cycle (SPEC §24.9, INV-019)
+        run: |
+          docker exec billing-core gosu postgres psql -c "ALTER ROLE billing CREATEDB"
+          docker exec billing-core mkdir -p /data/backups
+          docker exec billing-core billing-core backup \
+            --destination /data/backups \
+            --database-url postgres://billing:billing@127.0.0.1/billing_core
+          ARCHIVE=$(docker exec billing-core sh -c 'ls /data/backups/*.tar.gz | head -1')
+          docker exec billing-core billing-core-restore-verify \
+            --source "$ARCHIVE" \
+            --admin-url postgres://billing:billing@127.0.0.1/billing_core
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs billing-core || true
+
+  revryn:
+    name: revryn (Go)
     runs-on: ubuntu-latest
 
     steps:
@@ -137,16 +265,152 @@ jobs:
 
       - name: Check for Go module
         id: gomod
-        run: echo "exists=$([ -f go.mod ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        run: echo "exists=$([ -f clients/revryn/go.mod ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
         if: steps.gomod.outputs.exists == 'true'
         with:
-          go-version: "1.22"
+          go-version: "1.23"
 
       - name: Vet and test
         if: steps.gomod.outputs.exists == 'true'
+        working-directory: clients/revryn
         run: |
           go vet ./...
           go build ./...
           go test ./...
+
+  showcase-django:
+    name: showcase driftbord (Django, standalone)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up the showcase
+        working-directory: examples/work-management-django
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt
+          .venv/bin/python manage.py migrate
+
+      - name: Standalone Django suite (INV-030 — no Billing Core anywhere)
+        working-directory: examples/work-management-django
+        run: .venv/bin/python manage.py test
+
+      - name: Guard — the Billing Core client stays behind the seam (INV-030/031)
+        # Standalone certification passed, so the integration adapter may
+        # exist — but only the seam switch and the adapter package itself
+        # may reference it, and standalone stays the default mode.
+        run: |
+          ! grep -rn "billing_core" examples/work-management-django \
+              --include="*.py" \
+              --exclude-dir=.venv --exclude-dir=billing_core \
+            | grep -v "billing_seam/seam.py" \
+            | grep -v "driftbord/settings.py" \
+            | grep -vi "billing core"
+          ! grep -rn "DRIFTBORD_BILLING" examples/work-management-django/e2e --include="*.ts" \
+              --exclude-dir=node_modules
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Standalone Playwright suite
+        working-directory: examples/work-management-django/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+  showcase-rails:
+    name: showcase kystvej-crm (Rails, standalone)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: examples/crm-rails
+
+      - name: Standalone Rails suite (INV-030 — no Billing Core anywhere)
+        working-directory: examples/crm-rails
+        run: |
+          bin/rails db:prepare
+          bin/rails test
+
+      - name: Guard — the Billing Core client stays behind the seam (INV-030/031)
+        # Standalone certification passed, so the adapter may exist — but
+        # only the seam switch, the adapter lib, its link model, and the
+        # membership hook may reference it; standalone stays the default.
+        run: |
+          ! grep -rn "BillingCore" examples/crm-rails/app examples/crm-rails/test \
+              --include="*.rb" \
+            | grep -v "app/models/billing_core_link.rb" \
+            | grep -v "app/models/membership.rb"
+          ! grep -rn "KYSTVEJ_BILLING" examples/crm-rails/e2e --exclude-dir=node_modules
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Standalone Playwright suite
+        working-directory: examples/crm-rails/e2e
+        env:
+          PW_SKIP_MISE: "1"
+        run: |
+          sed -i 's/mise exec ruby@3.3 -- //g' playwright.config.ts
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+  showcase-laravel:
+    name: showcase personalehuset (Laravel, standalone)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+
+      - name: Set up the showcase
+        working-directory: examples/employee-directory-laravel
+        run: |
+          composer install --no-interaction --quiet
+          cp .env.example .env
+          php artisan key:generate
+          php artisan migrate --force
+
+      - name: Standalone feature suite (INV-030)
+        working-directory: examples/employee-directory-laravel
+        run: php artisan test
+
+      - name: Guard — the Billing Core client stays behind the seam (INV-030/031)
+        run: |
+          ! grep -rn "BillingCore" examples/employee-directory-laravel/app examples/employee-directory-laravel/tests \
+              --include="*.php" \
+            | grep -v "app/BillingCore/" \
+            | grep -v "app/Models/BillingCoreLink.php" \
+            | grep -v "app/Models/Employee.php" \
+            | grep -v "app/Billing/Seam.php"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Standalone Playwright suite
+        working-directory: examples/employee-directory-laravel/e2e
+        run: |
+          sed -i 's/mise exec php@8.3 -- //g' playwright.config.ts
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test

@@ -1,0 +1,14 @@
+id:                  ca-1
+commercial account:  acct-1
+currency:            DKK
+available:           18000 DKK (minor units)
+reserved:            2000 DKK (minor units)
+disposition:         retain, v1
+
+grants:
+ID   ORIGIN    GRANTED  REMAINING  STATUS           EXPIRES
+g-1  goodwill  20000    18000      partially_spent  
+
+transactions:
+TYPE   AMOUNT (MINOR)  EFFECTIVE   REASON
+grant  20000           2026-08-01  goodwill

@@ -1,0 +1,46 @@
+{
+  "data": [
+    {
+      "id": "cc-1",
+      "state": "closed",
+      "closeKind": "regular",
+      "reversalOfCloseId": null,
+      "currency": "DKK",
+      "periodStart": "2026-07-01",
+      "periodEndExclusive": "2026-08-01",
+      "transactionCutoff": "2026-08-01T00:00:00Z",
+      "openingMinor": 0,
+      "closingMinor": 250000,
+      "netChangeMinor": 250000,
+      "economicLiabilityLineMinor": -250000,
+      "ledgerTransactionCount": 3,
+      "reportSha256": "aaaa1111",
+      "closedAt": "2026-08-02T09:00:00Z",
+      "externalVoucherNumber": "1042",
+      "movements": [],
+      "evidence": []
+    },
+    {
+      "id": "cc-2",
+      "state": "ready",
+      "closeKind": "regular",
+      "reversalOfCloseId": null,
+      "currency": "DKK",
+      "periodStart": "2026-08-01",
+      "periodEndExclusive": "2026-09-01",
+      "transactionCutoff": "2026-09-01T00:00:00Z",
+      "openingMinor": 250000,
+      "closingMinor": 260000,
+      "netChangeMinor": 10000,
+      "economicLiabilityLineMinor": -10000,
+      "ledgerTransactionCount": 1,
+      "reportSha256": "bbbb2222",
+      "closedAt": null,
+      "externalVoucherNumber": null,
+      "movements": [],
+      "evidence": []
+    }
+  ],
+  "correlationId": "corr-fixed",
+  "schema": "revryn.v1"
+}

@@ -160,6 +160,12 @@ defmodule BillingCore.Billing.Preview do
       %FixedRecurring{} ->
         rate_fixed(component, model, ctx)
 
+      # A minimum commit over a non-metered inner rates like a fixed
+      # recurring component (§10.6): the engine handles the max() uplift;
+      # a metered inner routes through usage aggregation below.
+      %BillingCore.Pricing.Model.MinimumCommit{inner: %FixedRecurring{}} ->
+        rate_fixed(component, model, ctx)
+
       %OneTime{} ->
         # One-time components are billed through charge instances, not the
         # recurring preview (BC-US-041).
@@ -620,9 +626,22 @@ defmodule BillingCore.Billing.Preview do
 
   # Customer credit eligible to offset this invoice (BC-US-108): the
   # customer's commercial account may hold a currency-scoped credit balance.
+  # SPEC §9.4.1: a certified receivable-settlement mode is a precondition
+  # for automatic application — with none, no credit is planned (the system
+  # never nets an invoice silently).
   defp credit_availability(scope, customer, currency) do
     team_id = Scope.team_id!(scope)
 
+    {settlement_mode, _policy} = BillingCore.Credits.Settlements.settlement_mode(team_id)
+
+    if settlement_mode == :none do
+      {nil, 0}
+    else
+      credit_account_balance(team_id, customer, currency)
+    end
+  end
+
+  defp credit_account_balance(team_id, customer, currency) do
     account_id =
       Repo.one(
         from atc in "account_team_customers",

@@ -106,6 +106,44 @@ defmodule BillingCoreWeb.CustomerLive.Show do
                 </tr>
               </tbody>
             </table>
+
+            <details :if={@credit_accounts != []} class="mt-3 text-sm">
+              <summary class="cursor-pointer select-none opacity-70 hover:opacity-100">
+                Grant credit…
+              </summary>
+              <p class="mt-2 mb-2 text-xs opacity-70">
+                A grant is an individual liability movement in the credit subledger — money the
+                company owes this customer, never a discount hidden in a price (BC-US-107). It is
+                applied automatically before new money is due and aggregates into the monthly
+                close.
+              </p>
+              <.form for={@grant_form} id="grant-credit-form" phx-submit="grant_credit">
+                <div class="grid gap-2 sm:grid-cols-2">
+                  <.input
+                    field={@grant_form[:credit_account_id]}
+                    type="select"
+                    label="Account"
+                    options={credit_account_options(@credit_accounts)}
+                  />
+                  <.input
+                    field={@grant_form[:origin_type]}
+                    type="select"
+                    label="Origin"
+                    options={BillingCore.Credits.CreditGrant.origin_types()}
+                  />
+                  <.input field={@grant_form[:amount]} type="text" label="Amount" required />
+                  <.input
+                    field={@grant_form[:reason_code]}
+                    type="text"
+                    label="Reason code"
+                    placeholder="e.g. goodwill_incident_42"
+                  />
+                </div>
+                <.button variant="primary" class="mt-2" phx-disable-with="Granting…">
+                  Grant credit
+                </.button>
+              </.form>
+            </details>
           </div>
         </section>
 
@@ -231,6 +269,37 @@ defmodule BillingCoreWeb.CustomerLive.Show do
     end
   end
 
+  def handle_event("grant_credit", %{"grant" => params}, socket) do
+    scope = socket.assigns.scope
+
+    with %{} = account <-
+           Enum.find(
+             socket.assigns.credit_accounts,
+             &(&1.id == params["credit_account_id"])
+           ) || {:error, :account_not_found},
+         {:ok, amount_minor} <- parse_amount(params["amount"], account.currency),
+         {:ok, _grant} <-
+           Credits.grant_credit(scope, %{
+             credit_account_id: account.id,
+             origin_type: params["origin_type"],
+             amount_minor: amount_minor,
+             currency: account.currency,
+             reason_code: presence(params["reason_code"]),
+             idempotency_key: "ui-grant-#{Ecto.UUID.generate()}"
+           }) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Credit granted into the subledger.")
+       |> refresh()}
+    else
+      {:error, :invalid_amount} ->
+        {:noreply, put_flash(socket, :error, "Enter the amount as a plain positive number.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, LiveHelpers.error_message(reason))}
+    end
+  end
+
   def handle_event("save_mapping", %{"mapping" => params}, socket) do
     attrs = %{
       erp_connection_id: params["erp_connection_id"],
@@ -287,9 +356,35 @@ defmodule BillingCoreWeb.CustomerLive.Show do
       credit_accounts: credit_accounts,
       connection: connection,
       edit_form: edit_form(current_version),
-      mapping_form: mapping_form(connection, mappings)
+      mapping_form: mapping_form(connection, mappings),
+      grant_form:
+        to_form(
+          %{
+            "credit_account_id" => credit_accounts |> List.first() |> then(&(&1 && &1.id)),
+            "origin_type" => "goodwill",
+            "amount" => "",
+            "reason_code" => ""
+          },
+          as: "grant"
+        )
     )
   end
+
+  defp credit_account_options(accounts) do
+    Enum.map(accounts, fn account -> {account.currency, account.id} end)
+  end
+
+  defp parse_amount(input, currency) when is_binary(input) do
+    amount = BillingCore.Domain.Money.round_major(Decimal.new(String.trim(input)), currency)
+    if amount.minor_units > 0, do: {:ok, amount.minor_units}, else: {:error, :invalid_amount}
+  rescue
+    _invalid -> {:error, :invalid_amount}
+  end
+
+  defp parse_amount(_input, _currency), do: {:error, :invalid_amount}
+
+  defp presence(""), do: nil
+  defp presence(value), do: value
 
   defp edit_form(nil), do: to_form(%{}, as: "customer")
 

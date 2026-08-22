@@ -116,7 +116,9 @@ Discount assignments: `active` → `deactivated`.
 
 Queries `product(s)`, `plan`, `planVersion`, `discount`; mutations
 `createProduct`, `createPlan`, `createPlanVersion` (draft with components
-in one command), `publishPlanVersion`.
+in one command), `publishPlanVersion`, and `mapProductToErp` (BC-US-011 —
+mirrors `mapCustomerToErp`; finance-role gated upsert of the ERP product
+number for a connection).
 
 ## CLI surface
 

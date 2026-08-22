@@ -7,6 +7,8 @@ defmodule BillingCore.Operations.Operation do
 
   use Ecto.Schema
 
+  @type t :: %__MODULE__{}
+
   import Ecto.Changeset
 
   @schema_prefix "billing"

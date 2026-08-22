@@ -195,6 +195,4 @@ defmodule BillingCoreWeb.GraphQL.Resolvers.Billing do
 
   defp preview_error_code(reason) when is_atom(reason),
     do: reason |> Atom.to_string() |> String.upcase()
-
-  defp preview_error_code(_reason), do: "PREVIEW_FAILED"
 end

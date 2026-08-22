@@ -1,0 +1,7 @@
+<h1><%= @current_organization.name %> · Activity</h1>
+<ul class="cardlist" id="activity-list">
+  <% @activities.each do |activity| %>
+    <li><span class="muted"><%= activity.created_at.strftime("%Y-%m-%d %H:%M") %></span>
+        <strong><%= activity.actor&.display_name %></strong> <%= activity.summary %></li>
+  <% end %>
+</ul>

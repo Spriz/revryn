@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Register · Driftbord{% endblock %}
+{% block content %}
+<h1>Create your account</h1>
+<form method="post" id="register-form" class="card narrow">{% csrf_token %}
+  <label>Full name <input name="full_name"></label>
+  <label>Email <input type="email" name="email" required></label>
+  <label>Password <input type="password" name="password" minlength="8" required></label>
+  <button id="register-submit">Create account</button>
+  <p><a href="{% url 'login' %}">Already registered? Sign in</a></p>
+</form>
+{% endblock %}

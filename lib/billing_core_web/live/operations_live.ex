@@ -9,7 +9,7 @@ defmodule BillingCoreWeb.OperationsLive do
 
   on_mount BillingCoreWeb.TeamScope
 
-  alias BillingCore.{Operations, Scope}
+  alias BillingCore.Operations
   alias BillingCore.ERP.Sync
   alias BillingCoreWeb.LiveHelpers
 
@@ -47,6 +47,15 @@ defmodule BillingCoreWeb.OperationsLive do
               {attention_label(operation)}
             </span>
           </div>
+
+          <%!-- SPEC BC-US-156: whether retry is safe, stated explicitly. --%>
+          <p
+            :if={attention(operation) == :action_required}
+            id={"safety-#{operation.id}"}
+            class="mt-2 text-sm"
+          >
+            {retry_safety(operation)}
+          </p>
 
           <dl class="mt-2 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
             <div :if={operation.error_class} class="flex gap-2">
@@ -97,7 +106,10 @@ defmodule BillingCoreWeb.OperationsLive do
 
           <div class="mt-3 flex gap-2">
             <.button
-              :if={operation.state == "failed" and erp_operation?(operation)}
+              :if={
+                remediation_kind(operation) == :user_fixable and operation.state == "failed" and
+                  erp_operation?(operation)
+              }
               id={"retry-#{operation.id}"}
               variant="primary"
               phx-click="retry"
@@ -117,7 +129,31 @@ defmodule BillingCoreWeb.OperationsLive do
               Remediate &amp; requeue
             </.button>
           </div>
+
+          <%!-- BC-US-156: copyable support bundle when self-service is
+               limited, with precise next-step guidance. --%>
+          <div :if={attention(operation) == :action_required} class="mt-3">
+            <p id={"guidance-#{operation.id}"} class="text-xs opacity-70">
+              {guidance(operation)}
+            </p>
+            <input
+              id={"bundle-#{operation.id}"}
+              type="text"
+              readonly
+              phx-hook=".SelectOnClick"
+              value={support_bundle(operation)}
+              class="mt-1 w-full rounded border border-base-300 bg-base-200 px-2 py-1 font-mono text-xs"
+            />
+          </div>
         </div>
+
+        <script :type={Phoenix.LiveView.ColocatedHook} name=".SelectOnClick">
+          export default {
+            mounted() {
+              this.el.addEventListener("click", () => this.el.select());
+            }
+          }
+        </script>
       </section>
 
       <section class="mt-10 space-y-2">
@@ -148,8 +184,21 @@ defmodule BillingCoreWeb.OperationsLive do
     """
   end
 
+  @refresh_interval 4_000
+
   def mount(_params, _session, socket) do
+    # In-flight operations settle asynchronously; the inbox re-derives on a
+    # short timer so arriving failures and automatic recoveries show up
+    # without a manual reload (SPEC §22.9.3).
+    if connected?(socket) do
+      :timer.send_interval(@refresh_interval, self(), :refresh)
+    end
+
     {:ok, socket |> assign(page_title: "Operations") |> refresh()}
+  end
+
+  def handle_info(:refresh, socket) do
+    {:noreply, refresh(socket)}
   end
 
   def handle_event("retry", %{"id" => id}, socket) do
@@ -163,23 +212,14 @@ defmodule BillingCoreWeb.OperationsLive do
   end
 
   def handle_event("remediate", %{"id" => id}, socket) do
-    scope = socket.assigns.scope
-
-    with :ok <- authorize_remediate(scope),
-         {:ok, operation} <- fetch_team_operation(socket, id),
-         {:ok, _requeued} <- Operations.transition(operation, :remediate) do
+    # Authorization (operator-only vs finance) and requeueing live in the
+    # domain command — this surface stays a thin adapter (SPEC §12.5).
+    with {:ok, operation} <- fetch_team_operation(socket, id),
+         {:ok, _requeued} <- Sync.remediate_operation(socket.assigns.scope, operation) do
       {:noreply, socket |> put_flash(:info, "Operation requeued after remediation.") |> refresh()}
     else
       {:error, reason} ->
         {:noreply, socket |> put_flash(:error, LiveHelpers.error_message(reason)) |> refresh()}
-    end
-  end
-
-  defp authorize_remediate(scope) do
-    if Scope.has_team_role?(scope, [:finance_operator, :team_admin]) do
-      :ok
-    else
-      {:error, :unauthorized}
     end
   end
 
@@ -218,8 +258,65 @@ defmodule BillingCoreWeb.OperationsLive do
 
   defp attention_label(operation) do
     case attention(operation) do
-      :action_required -> "action required"
-      :automatic -> "automatic"
+      :automatic ->
+        "automatic"
+
+      :action_required ->
+        case remediation_kind(operation) do
+          :user_fixable -> "action required — user-fixable"
+          :operator_only -> "action required — operator-only"
+          :non_retryable -> "action required — non-retryable"
+          :automatic -> "action required"
+        end
     end
+  end
+
+  # BC-US-156: the remediation taxonomy behind the action-required states.
+  defp remediation_kind(%{state: "blocked", error_class: "authorization"}), do: :operator_only
+  defp remediation_kind(%{state: "blocked"}), do: :user_fixable
+
+  defp remediation_kind(%{state: "failed", error_class: class})
+       when class in ["terminal", "poison"],
+       do: :non_retryable
+
+  defp remediation_kind(%{state: "failed"}), do: :user_fixable
+  defp remediation_kind(_operation), do: :automatic
+
+  defp retry_safety(operation) do
+    case remediation_kind(operation) do
+      :user_fixable ->
+        "Retry is safe: it reuses the same operation key, so no duplicate external effect can occur. Correct the underlying data first."
+
+      :operator_only ->
+        "Retry alone will not help: the provider rejected our authority. A team admin must revalidate the ERP connection, then requeue."
+
+      :non_retryable ->
+        "Not retryable from this inbox: the provider cannot accept this request in any retry. Escalate with the support bundle below."
+
+      :automatic ->
+        "No action needed — the retry policy is handling this."
+    end
+  end
+
+  defp guidance(operation) do
+    case remediation_kind(operation) do
+      :user_fixable ->
+        "Fix the cause shown above, then press Retry. If it fails again with the same code, share this bundle with support:"
+
+      :operator_only ->
+        "Ask a team admin to revalidate the ERP connection under Settings, then requeue here. Share this bundle if the provider keeps rejecting:"
+
+      :non_retryable ->
+        "Escalate to support with this bundle — it identifies the exact operation and audit trail without exposing any payload:"
+
+      :automatic ->
+        "Reference for support:"
+    end
+  end
+
+  defp support_bundle(operation) do
+    "revryn-support operation=#{operation.id} type=#{operation.type} " <>
+      "code=#{operation.safe_error_code || operation.error_class || "unknown"} " <>
+      "correlation=#{operation.correlation_id || "none"}"
   end
 end

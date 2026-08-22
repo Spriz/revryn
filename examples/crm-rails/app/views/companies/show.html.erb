@@ -1,0 +1,35 @@
+<h1 id="company-name"><%= @company.name %></h1>
+<p class="muted"><%= @company.domain %> · <%= @company.city %></p>
+<p><a href="<%= organization_companies_path(@current_organization.slug) %>">&larr; Companies</a></p>
+<div class="grid2">
+  <section class="card">
+    <h2>Contacts</h2>
+    <ul id="company-contacts">
+      <% @contacts.each do |contact| %>
+        <li><a href="<%= organization_contact_path(@current_organization.slug, contact.id) %>"><%= contact.full_name %></a></li>
+      <% end %>
+    </ul>
+    <h2>Deals</h2>
+    <ul id="company-deals">
+      <% @deals.each do |deal| %>
+        <li><a href="<%= organization_deal_path(@current_organization.slug, deal.id) %>"><%= deal.title %></a>
+            <span class="muted"><%= deal.stage.name %> · <%= deal.amount_display %></span></li>
+      <% end %>
+    </ul>
+  </section>
+  <section class="card">
+    <h2>Notes</h2>
+    <ul id="note-list">
+      <% @notes.each do |note| %>
+        <li><strong><%= note.author.display_name %></strong> <%= note.body %>
+            <span class="muted"><%= note.created_at.strftime("%Y-%m-%d") %></span></li>
+      <% end %>
+    </ul>
+    <%= form_with url: organization_notes_path(@current_organization.slug), method: :post, html: { id: "note-form" } do %>
+      <input type="hidden" name="notable_type" value="Company">
+      <input type="hidden" name="notable_id" value="<%= @company.id %>">
+      <textarea name="body" required placeholder="Add a note…"></textarea>
+      <button id="note-submit">Add note</button>
+    <% end %>
+  </section>
+</div>

@@ -61,6 +61,17 @@ run_release() {
   exec gosu app /app/bin/billing_core "$@"
 }
 
+# Inside an all-in-one container (bundled cluster present), `docker exec`
+# sessions don't see the DATABASE_URL the entrypoint process exported —
+# default it so `migrate`/`doctor` work against the bundled database. Web
+# and worker roles never default: a wrong silent target is worse than a
+# clear missing-variable error.
+default_bundled_database_url() {
+  if [ -z "${DATABASE_URL:-}" ] && [ -s "$PGDATA/PG_VERSION" ]; then
+    export DATABASE_URL="ecto://billing:billing@127.0.0.1/billing_core"
+  fi
+}
+
 case "$ROLE" in
   all-in-one)
     require_free_space
@@ -100,10 +111,12 @@ case "$ROLE" in
     ;;
 
   migrate)
+    default_bundled_database_url
     exec gosu app /app/bin/billing_core eval "BillingCore.Release.migrate()"
     ;;
 
   doctor)
+    default_bundled_database_url
     exec gosu app /app/bin/billing_core eval "BillingCore.Release.doctor()"
     ;;
 

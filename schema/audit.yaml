@@ -1,0 +1,101 @@
+# Generated from BillingCore.AuditExport.Retention — do not edit by hand.
+# Regenerate with:
+#   mix run --no-start -e 'File.write!("schema/audit.yaml", BillingCore.AuditExport.Retention.to_yaml())'
+version: 1
+default_financial_retention_years: 6
+partition_prefixes:
+  - usage_events_y
+classes:
+  financial_evidence:
+    policy: never pruned by automation; accountant-approved policy only (docs/accounting/retention.md)
+    tables:
+      - account_team_customers
+      - accounts
+      - approval_records
+      - audit_log
+      - billing_runs
+      - charge_instances
+      - charges
+      - contract_versions
+      - contracts
+      - correction_cases
+      - credit_close_transaction_memberships
+      - credit_disposition_policy_versions
+      - customer_credit_accounts
+      - customer_credit_close_approvals
+      - customer_credit_close_evidence
+      - customer_credit_close_movements
+      - customer_credit_close_policy_versions
+      - customer_credit_closes
+      - customer_credit_grants
+      - customer_credit_settlements
+      - customer_credit_transactions
+      - customer_erp_mappings
+      - customer_versions
+      - customers
+      - discount_assignments
+      - discount_versions
+      - discounts
+      - erp_connections
+      - erp_documents
+      - invoice_chains
+      - invoice_intent_lifecycle
+      - invoice_intent_state_transitions
+      - invoice_intents
+      - invoice_lines
+      - operation_transitions
+      - operations
+      - organizations
+      - plan_versions
+      - plans
+      - price_components
+      - product_erp_mappings
+      - product_versions
+      - products
+      - reconciliation_results
+      - subscription_changes
+      - subscription_versions
+      - subscriptions
+      - sync_operations
+      - team_settings_versions
+      - teams
+      - usage_event_keys
+      - usage_quarantine
+  identity_access:
+    policy: retained while the identity/membership is live plus the approved tail
+    tables:
+      - federated_identities
+      - organization_invitations
+      - organization_memberships
+      - recovery_codes
+      - team_memberships
+      - totp_factors
+      - user_emails
+      - users
+      - webauthn_credentials
+  operational:
+    policy: prunable machinery; durable truth lives in financial_evidence tables
+    tables:
+      - demo_workspaces
+      - fake_erp_instances
+      - idempotency_records
+      - outbox_events
+      - sessions
+      - webhook_receipts
+  raw_usage:
+    policy: team-configurable retention after invoice freeze (SPEC section 20, min 90 days); frozen calculation traces remain the financial evidence
+    tables:
+      - usage_events
+prunable:
+  - table: webhook_receipts
+    config_key: webhook_receipt_days
+    default_window_days: 90
+  - table: outbox_events
+    config_key: published_outbox_days
+    default_window_days: 30
+  - table: idempotency_records
+    config_key: expired_idempotency_days
+    default_window_days: 30
+  - table: sessions
+    config_key: dead_session_days
+    default_window_days: 30

@@ -1,0 +1,19 @@
+<h1>Search <%= @current_organization.name %></h1>
+<%= form_with url: organization_search_path(@current_organization.slug), method: :get, html: { id: "search-form", class: "card inlineform" } do %>
+  <input name="q" value="<%= @query %>" placeholder="Companies, contacts, deals…">
+  <button id="search-submit">Search</button>
+<% end %>
+<% if @query.present? %>
+  <h2>Companies</h2>
+  <ul class="cardlist" id="search-companies">
+    <% (@companies || []).each do |company| %><li><a href="<%= organization_company_path(@current_organization.slug, company.id) %>"><%= company.name %></a></li><% end %>
+  </ul>
+  <h2>Contacts</h2>
+  <ul class="cardlist" id="search-contacts">
+    <% (@contacts || []).each do |contact| %><li><a href="<%= organization_contact_path(@current_organization.slug, contact.id) %>"><%= contact.full_name %></a></li><% end %>
+  </ul>
+  <h2>Deals</h2>
+  <ul class="cardlist" id="search-deals">
+    <% (@deals || []).each do |deal| %><li><a href="<%= organization_deal_path(@current_organization.slug, deal.id) %>"><%= deal.title %></a></li><% end %>
+  </ul>
+<% end %>

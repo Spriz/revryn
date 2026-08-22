@@ -78,6 +78,18 @@ scoped per `(team, account, currency)`.
    skips grants tied up in active reservations.
 8. `reconcile_account` — recomputes both projections from the ledger and
    fails loudly on divergence.
+9. Unused-prepaid-service reduction (BC-US-107) —
+   `Credits.UnusedService.credit_reduction/3` computes the exact unused
+   value of a booked over-time line for a quantity reduction with the same
+   §10.1 day-based proration the rating engine uses
+   (`amount × unused_days/period_days × Δquantity/quantity`, one
+   half-away-from-zero rounding at the final amount) and opens a partial
+   credit note through the ordinary correction workflow. When the credit
+   note becomes authoritative, completing the correction case funds the
+   ledger exactly once (case-derived idempotency key, origin references
+   recorded); completion is refused — never silently skipped — while the
+   customer lacks a linked credit account. The booked original is never
+   mutated.
 
 ## State transitions
 
@@ -123,16 +135,43 @@ stateDiagram-v2
 
 ## GraphQL contract
 
-None yet — the credits context is Elixir-level; invoice previews expose
-`credit` amounts indirectly (see invoice-preview-and-freeze).
+`creditAccounts(teamId, customerId)` exposes team-scoped accounts with
+their grants and append-only transactions; `grantCredit` creates a grant
+with a typed result union and idempotent replay. Invoice previews expose
+`credit` amounts on the preview itself (see invoice-preview-and-freeze).
+`creditAccount.dispositionPolicy` and `setCreditDispositionPolicy` manage
+the BC-US-109 policy. Receivable settlement (SPEC §9.4.1):
+`creditSettlements(teamId, invoiceIntentId, state)` lists the settlement
+records opened by credit applications and `recordExternalSettlement`
+reconciles one exactly once in `external_reference` mode; the close
+posting policy carries `settlementMode` and the clearing/contra accounts.
+
+### Receivable-settlement mode
+
+The currently effective close posting-policy version declares which
+system owns open receivables. While it is `none` (or no policy exists),
+previews plan no credit and a crafted freeze with credit rolls back —
+the system never nets an invoice silently. `erp_customer_settlement`
+posts a two-line clearing voucher (debit clearing, credit contra — both
+accountant-approved) as a durable operation when the invoice books, with
+find-before-create idempotency and read-back reconciliation.
+`external_reference` records the authoritative external system's
+settlement reference exactly once. Settlement records are immutable
+identity-wise at the database level; `pending → reconciled` is the only
+transition and it is terminal.
 
 ## CLI surface
 
-Not yet implemented (BC-US-157 planned).
+`revryn credits` — accounts (balances, grants, transactions,
+disposition), settlements, grant, set-disposition, settle-external; the
+posting policy's settlement mode rides `credit-closes create-policy`.
+See `docs/cli/credits.md`.
 
 ## MCP surface
 
-Not yet implemented (BC-US-158 planned).
+Read tools `list_credit_accounts` and `list_credit_settlements`; mutating,
+confirm-gated tools `grant_credit`, `set_credit_disposition_policy`, and
+`record_external_settlement`. See `clients/revryn/contracts/mcp/tools.md`.
 
 ## UI behavior
 
@@ -169,6 +208,12 @@ double-spend protection, refund/expiry/reversal, policy immutability and
 execution, loud reconciliation, database append-only.
 `test/workflows/credit_application_test.exs` — credit applied at
 preview/freeze exactly once.
+`test/workflows/receivable_settlement_test.exs` — SPEC §9.4.1: blocked
+application without a certified mode, exactly-once external-reference
+reconciliation with database-enforced immutability, and the booked-invoice
+clearing voucher posted/reconciled through FakeERP with replay safety.
+`test/graphql/credit_settlements_test.exs` — the policy/settlement
+surface with typed problems and cross-team denial.
 
 ## Security / privacy
 
@@ -177,8 +222,6 @@ Team- and organization-scoped access; actor references on every ledger row;
 
 ## Limitations
 
-- No GraphQL/UI surface for balances, grants, or policies yet (SPEC
-  intends UI/GraphQL/CLI/MCP exposure).
 - No FX policy — credit never crosses currencies (INV-052).
-- Subscription-termination triggering of `execute_disposition` is wired by
-  the billing layer, not automatic on cancellation yet.
+- The e-conomic clearing-voucher account mapping and sign conventions
+  await accountant sign-off before production certification (SPEC §26).

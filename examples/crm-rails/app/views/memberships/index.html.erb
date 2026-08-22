@@ -1,0 +1,54 @@
+<h1><%= @current_organization.name %> · Members</h1>
+<p><a href="<%= organization_path(@current_organization.slug) %>">&larr; Back</a></p>
+<table class="table" id="members-table">
+  <thead><tr><th>Member</th><th>Role</th><th></th></tr></thead>
+  <tbody>
+    <% @memberships.each do |membership| %>
+      <tr id="member-<%= membership.id %>">
+        <td><%= membership.user.display_name %> <span class="muted"><%= membership.user.email %></span></td>
+        <td>
+          <% if current_membership.admin? %>
+            <%= form_with url: organization_membership_path(@current_organization.slug, membership.id), method: :patch, html: { class: "inline" } do %>
+              <select name="role" onchange="this.form.submit()">
+                <% Membership::ROLES.each do |role| %>
+                  <option value="<%= role %>" <%= "selected" if membership.role == role %>><%= role %></option>
+                <% end %>
+              </select>
+            <% end %>
+          <% else %><%= membership.role %><% end %>
+        </td>
+        <td>
+          <% if current_membership.admin? && membership.user != current_user %>
+            <%= button_to "Remove", organization_membership_path(@current_organization.slug, membership.id), method: :delete, class: "danger" %>
+          <% end %>
+        </td>
+      </tr>
+    <% end %>
+  </tbody>
+</table>
+
+<% if current_membership.admin? %>
+  <h2>Invite</h2>
+  <%= form_with url: organization_invitations_path(@current_organization.slug), method: :post, html: { id: "invite-form", class: "card" } do %>
+    <label>Email <input type="email" name="email" required></label>
+    <label>Role
+      <select name="role"><% Membership::ROLES.each do |role| %><option value="<%= role %>"><%= role %></option><% end %></select>
+    </label>
+    <button id="invite-submit">Create invitation link</button>
+  <% end %>
+
+  <h2>Invitations</h2>
+  <table class="table" id="invitations-table">
+    <tbody>
+      <% @invitations.each do |invitation| %>
+        <tr>
+          <td><%= invitation.email %> · <%= invitation.role %></td>
+          <td><% if invitation.accepted_at %>accepted<% elsif invitation.revoked_at %>revoked<% else %>pending<% end %></td>
+          <td><% if invitation.pending? %>
+            <%= button_to "Revoke", revoke_organization_invitation_path(@current_organization.slug, invitation.id), method: :post, class: "danger" %>
+          <% end %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% end %>

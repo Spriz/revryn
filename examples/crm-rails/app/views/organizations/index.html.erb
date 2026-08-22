@@ -1,0 +1,9 @@
+<h1>Your organizations</h1>
+<ul class="cardlist" id="org-list">
+  <% @memberships.each do |membership| %>
+    <li><a href="<%= organization_path(membership.organization.slug) %>"><%= membership.organization.name %></a>
+        <span class="muted"><%= membership.role %></span></li>
+  <% end %>
+  <% if @memberships.empty? %><li id="no-orgs">No organizations yet.</li><% end %>
+</ul>
+<p><a class="button" id="new-org" href="<%= new_organization_path %>">New organization</a></p>

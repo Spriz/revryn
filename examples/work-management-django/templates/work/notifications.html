@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Notifications</h1>
+<form method="post" id="mark-read-form">{% csrf_token %}<button id="mark-all-read">Mark all read</button></form>
+<ul class="cardlist" id="notification-list">
+  {% for row in rows %}
+  <li class="{% if not row.read_at %}unread{% endif %}">{{ row.text }} <span class="muted">{{ row.created_at }}</span></li>
+  {% empty %}<li id="no-notifications">Nothing yet.</li>
+  {% endfor %}
+</ul>
+{% endblock %}

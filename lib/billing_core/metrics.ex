@@ -13,6 +13,9 @@ defmodule BillingCore.Metrics do
   import Telemetry.Metrics
 
   @doc "Domain + framework metrics for the Prometheus exporter."
+  # Dialyzer false positive from telemetry_metrics' constructor specs
+  # (the `:name` option); the list builds fine at runtime (boot-proven).
+  @dialyzer {:nowarn_function, metrics: 0}
   def metrics do
     [
       # HTTP (from Phoenix telemetry)

@@ -32,7 +32,7 @@ defmodule BillingCore.Scope do
   @type t :: %__MODULE__{
           principal_type: :user | :service,
           user: struct() | nil,
-          service_credential: struct() | nil,
+          service_credential: struct() | map() | nil,
           organization: struct() | nil,
           team: struct() | nil,
           organization_roles: [organization_role()],

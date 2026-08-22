@@ -1,0 +1,384 @@
+---
+import { getCollection } from "astro:content";
+import Base from "../layouts/Base.astro";
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+const repo = "https://github.com/spriz/revryn";
+
+const features = (await getCollection("features", (e) => e.data.public)).sort(
+  (a, b) => a.data.title.localeCompare(b.data.title),
+);
+
+function excerpt(body: string | undefined): string {
+  if (!body) return "";
+  const paras = body
+    .replace(/^---[\s\S]*?---/, "")
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter((p) => p && !p.startsWith("#"));
+  return (paras[0] ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/[*_`\[\]]/g, "")
+    .slice(0, 180);
+}
+
+const previewQuery = `query Preview($teamId: ID!, $subId: ID!) {
+  invoicePreview(teamId: $teamId,
+                 subscriptionId: $subId,
+                 asOf: "2026-09-01") {
+    invoiceDate
+    periodStart
+    periodEndExclusive      # half-open, always
+    netAmountMinor          # integer øre — never a float
+    fingerprint             # freeze verifies against this
+    blockers                # empty ⇒ freezable
+    lines { description quantity amountMinor
+            recognition servicePeriodStart }
+  }
+}`;
+
+const cliSample = `$ revryn invoices preview --subscription sub-1 --as-of 2026-09-01
+subscription:  sub-1
+period:        2026-09-01 .. 2026-10-01 (excl)
+net amount:    250000 DKK (minor units)
+fingerprint:   fp-abc
+
+$ revryn invoices freeze --subscription sub-1 \\
+    --expected-fingerprint fp-abc
+$ revryn invoices sync --intent in-1   # → e-conomic draft`;
+
+const invariants = [
+  {
+    title: "Integer money, end to end",
+    body: "Amounts are integer minor units (øre). Intermediate quantities and rates use arbitrary-precision decimals; rounding happens exactly once, half-away-from-zero, at the final line amount. Allocation residuals distribute by largest remainder with a stable tie-break.",
+  },
+  {
+    title: "Accrual-aware by construction",
+    body: "Every over-time line carries a half-open service period the ERP can defer revenue against; point-in-time lines never do. Your accountant sees September revenue in September — even on annual prepaid invoices.",
+  },
+  {
+    title: "Booked documents are immutable",
+    body: "Once a document is booked in the ERP it is never edited. Corrections are compensating documents — credit notes, reversing closes — so the audit trail always sums to the truth.",
+  },
+  {
+    title: "Idempotent, reconciled side effects",
+    body: "Every external write carries a stable operation key, is retried at-least-once, and is verified by reading the ERP back. An outcome-unknown timeout is searched before it is retried — no duplicate invoices.",
+  },
+  {
+    title: "Deterministic and hash-chained",
+    body: "Frozen invoice intents, credit closes, and audit exports are canonical JSON snapshots with content hashes. Same inputs, same fingerprint, byte for byte — verifiable years later.",
+  },
+  {
+    title: "Failure is a first-class state",
+    body: "Explicit transition-table state machines back every lifecycle, and a failure inbox classifies every stuck operation: user-fixable, operator-only, or non-retryable — each with a remediation path.",
+  },
+];
+
+const steps = [
+  ["Model the catalog", "Products, plans, and versioned pricing: tiered and graduated seats, metered usage, minimum commits, annual prepaid with 12-as-10, discounts as negative lines."],
+  ["Ingest usage", "Batch or single events over GraphQL with idempotency keys, into monthly partitions. Rating aggregates in SQL at a frozen cutoff — raw events never load into app memory."],
+  ["Preview, then freeze", "Previews are deterministic and fingerprinted. Freezing re-computes and verifies the fingerprint, so what you showed the customer is exactly what gets invoiced."],
+  ["Sync to e-conomic", "Frozen intents become ERP drafts (draft-first; booking stays a human decision). Durable jobs, backoff, read-after-write reconciliation, and a monthly credit close that posts an aggregate finance voucher with evidence attached."],
+];
+---
+
+<Base
+  title="Revryn — accrual-aware billing for e-conomic"
+  description="Open-source billing core for SaaS teams: usage-based and subscription billing computed in integer minor units, delivered to e-conomic as accrual-aware drafts. GraphQL-first, self-hosted, Apache-2.0."
+>
+  <!-- Hero -->
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <p class="eyebrow">Open-source billing core · Apache-2.0</p>
+        <h1>Billing your accountant<br />can actually book.</h1>
+        <p class="lede">
+          Revryn computes subscription and usage-based billing in
+          <strong>integer minor units</strong> and delivers it to
+          <strong>e-conomic</strong> as accrual-aware drafts — service periods,
+          deferrals, corrections and all. Self-hosted, GraphQL-first, built for
+          engineers at small companies who are also the billing team.
+        </p>
+        <div class="cta-row">
+          <a class="btn primary" href={repo}>Get the source</a>
+          <a class="btn secondary" href={`${base}/graphql/`}>GraphQL API docs</a>
+        </div>
+        <p class="hero-meta">
+          Elixir/Phoenix core · PostgreSQL · one OCI image · Go CLI + MCP server
+        </p>
+      </div>
+      <pre class="hero-code"><code>{previewQuery}</code></pre>
+    </div>
+  </section>
+
+  <!-- Pain -->
+  <section class="pain">
+    <div class="wrap">
+      <p class="eyebrow">Why this exists</p>
+      <h2>You shipped the product. Now you own the billing spreadsheet.</h2>
+      <div class="pain-grid">
+        <p>
+          <strong>The float bug you haven't found yet.</strong> Somewhere a
+          <code>* 0.25</code> is quietly losing øre. Revryn bans floating-point
+          money everywhere — the type system and the database enforce it.
+        </p>
+        <p>
+          <strong>Revenue in the wrong month.</strong> An annual invoice booked
+          as January revenue makes your numbers lie. Every over-time line here
+          carries the service period e-conomic needs to accrue it correctly.
+        </p>
+        <p>
+          <strong>The retry that double-invoiced a customer.</strong> Timeouts
+          against an ERP are a fact of life. Idempotent operation keys and
+          search-before-retry make them boring instead of expensive.
+        </p>
+        <p>
+          <strong>“Can you just check why customer X wasn't billed?”</strong>
+          The failure inbox answers that: every stuck operation, classified,
+          with the exact remediation and a copy-pasteable support bundle.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Invariants -->
+  <section id="invariants">
+    <div class="wrap">
+      <p class="eyebrow">Non-negotiable invariants</p>
+      <h2>Rules the codebase cannot break</h2>
+      <p class="section-lede">
+        These aren't conventions in a wiki — they're enforced by types,
+        database constraints, property tests, and CI. Read them in the
+        <a href={`${base}/features/`}>feature docs</a>; verify them in the
+        test suite.
+      </p>
+      <div class="card-grid">
+        {invariants.map((inv) => (
+          <div class="card static">
+            <h3>{inv.title}</h3>
+            <p>{inv.body}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section id="how-it-works">
+    <div class="wrap how-grid">
+      <div>
+        <p class="eyebrow">How it works</p>
+        <h2>Catalog → usage → freeze → e-conomic</h2>
+        <ol class="steps">
+          {steps.map(([title, body]) => (
+            <li>
+              <strong>{title}.</strong> {body}
+            </li>
+          ))}
+        </ol>
+        <p>
+          e-conomic stays the system of record for bookkeeping. Revryn is the
+          system of record for <em>why</em> every line exists — and can prove
+          it.
+        </p>
+      </div>
+      <div>
+        <pre class="hero-code"><code>{cliSample}</code></pre>
+        <p class="aside">
+          The same commands are exposed as an <strong>MCP server</strong>
+          (<code>revryn mcp serve</code>), so AI agents can operate billing
+          with read-only hints and confirmation gates — same domain commands,
+          same authorization scopes as the GraphQL API and the UI.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section id="features">
+    <div class="wrap">
+      <p class="eyebrow">Everything documented</p>
+      <h2>Feature docs are the source of truth</h2>
+      <p class="section-lede">
+        Every behavior-changing pull request updates the relevant document in
+        the same change — these pages are generated from the repository's
+        canonical <code>docs/features/</code>, not written by marketing.
+      </p>
+      <div class="card-grid">
+        {features.map((f) => (
+          <a class="card" href={`${base}/features/${f.id}/`}>
+            <h3>
+              {f.data.title}
+              <span class={`badge ${f.data.status}`}>{f.data.status}</span>
+            </h3>
+            <p>{excerpt(f.body)}…</p>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- Integrations -->
+  <section id="integrations">
+    <div class="wrap">
+      <p class="eyebrow">Drop into your stack</p>
+      <h2>Three reference integrations, kept honest by CI</h2>
+      <p class="section-lede">
+        The repo ships full showcase apps — <strong>Django</strong>,
+        <strong>Rails</strong>, and <strong>Laravel</strong> — each integrating
+        through a single billing seam module and certified end-to-end: real UI
+        actions drive seat counts, a live preview renders with its
+        fingerprint, and the invoice reconciles to an ERP draft in CI.
+      </p>
+      <div class="stack-row">
+        <span>Django 5</span><span>Rails 8</span><span>Laravel 13</span>
+        <span>GraphQL</span><span>Go CLI</span><span>MCP</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Final CTA -->
+  <section class="final">
+    <div class="wrap">
+      <h2>Own your billing. Keep your accountant happy.</h2>
+      <p class="section-lede">
+        One PostgreSQL database, one container image, an <code>fnox</code>-managed
+        secret catalog, and a test suite your auditor can read.
+      </p>
+      <div class="cta-row center">
+        <a class="btn primary" href={repo}>Star on GitHub</a>
+        <a class="btn secondary" href={`${base}/features/`}>Read the docs</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  section {
+    padding: 4.5rem 0;
+  }
+  .hero {
+    padding: 5.5rem 0 4rem;
+    background:
+      radial-gradient(
+        60rem 30rem at 80% -10%,
+        color-mix(in srgb, var(--accent) 7%, transparent),
+        transparent
+      );
+  }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    gap: 3rem;
+    align-items: center;
+  }
+  h1 {
+    font-size: clamp(2.1rem, 4.5vw, 3.3rem);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    margin: 0 0 1.25rem;
+  }
+  .lede {
+    color: var(--text-dim);
+    font-size: 1.12rem;
+    max-width: 34rem;
+  }
+  .cta-row {
+    display: flex;
+    gap: 0.9rem;
+    margin: 1.75rem 0 0;
+    flex-wrap: wrap;
+  }
+  .cta-row.center {
+    justify-content: center;
+  }
+  .hero-meta {
+    margin-top: 1.4rem;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--text-faint);
+  }
+  .hero-code {
+    font-size: 0.82rem;
+    box-shadow: 0 20px 60px rgb(0 0 0 / 0.35);
+  }
+  h2 {
+    font-size: clamp(1.5rem, 2.6vw, 2.1rem);
+    letter-spacing: -0.015em;
+    margin: 0 0 1rem;
+  }
+  .section-lede {
+    color: var(--text-dim);
+    max-width: 44rem;
+    margin-bottom: 2rem;
+  }
+  .pain {
+    border-block: 1px solid var(--border);
+    background: var(--bg-raised);
+  }
+  .pain-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+    gap: 1rem 2.5rem;
+  }
+  .pain-grid p {
+    color: var(--text-dim);
+    margin: 0.5rem 0;
+  }
+  .pain-grid strong {
+    color: var(--text);
+    display: block;
+    margin-bottom: 0.2rem;
+  }
+  .card.static:hover {
+    transform: none;
+    border-color: var(--border);
+  }
+  .how-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+    gap: 3rem;
+    align-items: start;
+  }
+  .steps {
+    padding-left: 1.2rem;
+    color: var(--text-dim);
+  }
+  .steps li {
+    margin: 0.9rem 0;
+  }
+  .steps strong {
+    color: var(--text);
+  }
+  .aside {
+    color: var(--text-faint);
+    font-size: 0.9rem;
+    margin-top: 1rem;
+  }
+  .stack-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+  .stack-row span {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 0.35rem 0.9rem;
+  }
+  .final {
+    text-align: center;
+    padding-bottom: 2rem;
+  }
+  .final .section-lede {
+    margin-inline: auto;
+  }
+  @media (max-width: 860px) {
+    .hero-grid,
+    .how-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

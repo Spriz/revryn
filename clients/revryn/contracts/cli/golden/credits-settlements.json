@@ -1,0 +1,32 @@
+{
+  "data": [
+    {
+      "id": "cs-1",
+      "invoiceIntentId": "ii-1",
+      "creditAccountId": "ca-1",
+      "currency": "DKK",
+      "amountMinor": 2000,
+      "mode": "external_reference",
+      "state": "pending",
+      "externalReference": null,
+      "externalVoucherNumber": null,
+      "reconciledAt": null,
+      "createdAt": "2026-08-20T08:00:00Z"
+    },
+    {
+      "id": "cs-2",
+      "invoiceIntentId": "ii-2",
+      "creditAccountId": "ca-1",
+      "currency": "DKK",
+      "amountMinor": 5000,
+      "mode": "erp_customer_settlement",
+      "state": "reconciled",
+      "externalReference": null,
+      "externalVoucherNumber": "1099",
+      "reconciledAt": "2026-08-21T08:00:00Z",
+      "createdAt": "2026-08-19T08:00:00Z"
+    }
+  ],
+  "correlationId": "corr-fixed",
+  "schema": "revryn.v1"
+}

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Your organizations</h1>
+<ul class="cardlist" id="org-list">
+  {% for membership in memberships %}
+  <li><a href="{% url 'organization_home' membership.organization.slug %}">{{ membership.organization.name }}</a>
+      <span class="muted">{{ membership.role }}</span></li>
+  {% empty %}
+  <li id="no-orgs">No organizations yet.</li>
+  {% endfor %}
+</ul>
+<p><a class="button" id="new-org" href="{% url 'create_organization' %}">New organization</a></p>
+{% endblock %}

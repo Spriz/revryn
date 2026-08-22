@@ -202,7 +202,10 @@ defmodule BillingCore.Operations do
   def failure_inbox(team_id) do
     Operation
     |> where([o], o.team_id == ^team_id)
-    |> where([o], o.state in ["blocked", "failed", "outcome_unknown", "reconciling"])
+    |> where(
+      [o],
+      o.state in ["blocked", "failed", "outcome_unknown", "reconciling", "retry_scheduled"]
+    )
     |> order_by([o], desc: o.updated_at)
     |> Repo.all()
   end

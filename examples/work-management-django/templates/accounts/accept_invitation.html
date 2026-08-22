@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Join {{ invitation.organization.name }}</h1>
+{% if invitation.is_pending %}
+<p>You were invited as <strong>{{ invitation.role }}</strong> ({{ invitation.email }}).</p>
+<form method="post" id="accept-invitation-form">{% csrf_token %}
+  <button id="accept-invitation">Accept invitation</button>
+</form>
+{% else %}
+<p id="invitation-settled">This invitation is no longer active.</p>
+{% endif %}
+{% endblock %}

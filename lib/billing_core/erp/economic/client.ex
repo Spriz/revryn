@@ -62,6 +62,16 @@ defmodule BillingCore.ERP.Economic.Client do
     )
   end
 
+  @doc "POST multipart form data with the operation idempotency key."
+  @spec post_multipart(context(), String.t(), keyword(), String.t(), keyword()) :: result()
+  def post_multipart(context, url, fields, idempotency_key, opts \\ [])
+      when is_list(fields) and is_binary(idempotency_key) do
+    request(
+      context,
+      [method: :post, url: url, form_multipart: fields, idempotency_key: idempotency_key] ++ opts
+    )
+  end
+
   @spec request(context(), keyword()) :: result()
   def request(context, opts) do
     {idempotency_key, opts} = Keyword.pop(opts, :idempotency_key)
@@ -100,7 +110,7 @@ defmodule BillingCore.ERP.Economic.Client do
       headers: [
         {"x-appsecrettoken", credential(credentials, :app_secret_token)},
         {"x-agreementgranttoken", credential(credentials, :agreement_grant_token)},
-        {"content-type", "application/json"}
+        {"accept", "application/json"}
       ],
       retry: false,
       decode_body: false,
@@ -144,5 +154,4 @@ defmodule BillingCore.ERP.Economic.Client do
 
   defp safe_reason(%{reason: reason}) when is_atom(reason), do: reason
   defp safe_reason(%struct{}), do: struct
-  defp safe_reason(_other), do: :unexpected
 end

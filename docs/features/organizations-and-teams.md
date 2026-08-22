@@ -105,13 +105,21 @@ accounts `active`/`archived`.
 
 ## GraphQL contract
 
-`viewer` (memberships and roles), `organizations`, `organization`, `team`,
-`teams`; mutations `createOrganization` (returns organization + first team),
-`createTeam`. See `schema/billing_core.graphql`.
+Queries: `viewer` (own memberships and roles), `organizations`,
+`organization`, `team`, `teams`, `organizationMemberships` /
+`teamMemberships` (admin directories with member emails), and
+`organizationInvitations` (BC-US-144). Mutations: `createOrganization`
+(returns organization + first team), `createTeam`, `renameTeam`,
+`archiveTeam` (organization scope — the owner need not be a member of the
+archived team), `inviteOrganizationMember` / `revokeOrganizationInvitation`,
+`addTeamMember` (requires an existing organization membership, INV-024),
+`changeTeamRoles`, `removeTeamMember`, and `changeOrganizationRoles`
+(last-owner protected). This is the full SPEC §14.5
+organizations-and-membership row. See `schema/billing_core.graphql`.
 
 ## CLI surface
 
-Not yet implemented. `billingctl` (BC-US-157) is planned; domain commands
+Not yet implemented. `revryn` (BC-US-157) is planned; domain commands
 are reachable via GraphQL.
 
 ## MCP surface
@@ -120,7 +128,10 @@ Not yet implemented (BC-US-158 planned).
 
 ## UI behavior
 
-LiveView surfaces under construction; domain commands available via GraphQL.
+First-run and dashboard workspace creation (`#create-workspace-form`,
+per-organization `#new-team-form-…`), the team members page
+(`/teams/:team_id/members`: role changes, removal, invitations with the
+one-time accept link), and the browser accept flow (`/invitations/:token`).
 
 ## Accounting / ERP effects
 
@@ -145,6 +156,14 @@ Audit events (`orgs.organization.created`, `orgs.team.*`,
 - `test/workflows/scope_resolution_test.exs` — INV-024/025 matrix: role
   locality, cross-organization substitution, platform_admin non-bypass,
   disabled/suspended targets.
+- `test/graphql/memberships_test.exs` — SPEC §14.5 contract breadth:
+  directories, role changes, INV-024 team grants, last-owner and
+  last-team protections, typed authorization problems.
+- `test/graphql/invitations_test.exs`, `test/workflows/invitation_test.exs`,
+  `test/billing_core_web/live/members_live_test.exs` — BC-US-144 invitation
+  lifecycle across API, mail, and browser.
+- `e2e/features/multi_membership.spec.ts` — INV-032: one identity with
+  conflicting roles across three teams in two organizations.
 
 ## Security / privacy
 
@@ -154,7 +173,8 @@ acting principal.
 
 ## Limitations
 
-- No GraphQL mutations yet for membership management, team archival,
-  settings, or accounts — context functions only.
+- Team settings and account administration remain context functions
+  without GraphQL mutations (accounts surface via the projection flow).
 - Organization suspension/closure workflows beyond the `status` field are
-  not implemented.
+  not implemented; `removeOrganizationMember` is intentionally absent from
+  the public contract (SPEC §14.5 table) and remains a context command.

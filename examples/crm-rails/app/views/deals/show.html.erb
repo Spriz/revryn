@@ -1,0 +1,39 @@
+<h1 id="deal-title"><%= @deal.title %></h1>
+<p>Stage <strong id="deal-stage"><%= @deal.stage.name %></strong>
+   · <span id="deal-amount"><%= @deal.amount_display %></span>
+   · status <strong id="deal-status"><%= @deal.status %></strong></p>
+<p><a href="<%= organization_pipeline_deals_path(@current_organization.slug, @deal.stage.pipeline_id) %>">&larr; Pipeline</a></p>
+<div class="grid2">
+<section class="card">
+  <h2>Move</h2>
+  <%= form_with url: move_organization_deal_path(@current_organization.slug, @deal.id), method: :post, html: { id: "move-deal-form" } do %>
+    <select name="stage_id">
+      <% @stages.each do |stage| %>
+        <option value="<%= stage.id %>" <%= "selected" if stage.id == @deal.stage_id %>><%= stage.name %></option>
+      <% end %>
+    </select>
+    <button id="move-deal-submit">Move</button>
+  <% end %>
+  <h2>Settle</h2>
+  <%= form_with url: settle_organization_deal_path(@current_organization.slug, @deal.id), method: :post, html: { class: "inline" } do %>
+    <input type="hidden" name="status" value="won"><button id="mark-won">Mark won</button>
+  <% end %>
+  <%= form_with url: settle_organization_deal_path(@current_organization.slug, @deal.id), method: :post, html: { class: "inline" } do %>
+    <input type="hidden" name="status" value="lost"><button class="danger" id="mark-lost">Mark lost</button>
+  <% end %>
+</section>
+<section class="card">
+  <h2>Notes</h2>
+  <ul id="note-list">
+    <% @notes.each do |note| %>
+      <li><strong><%= note.author.display_name %></strong> <%= note.body %></li>
+    <% end %>
+  </ul>
+  <%= form_with url: organization_notes_path(@current_organization.slug), method: :post, html: { id: "note-form" } do %>
+    <input type="hidden" name="notable_type" value="Deal">
+    <input type="hidden" name="notable_id" value="<%= @deal.id %>">
+    <textarea name="body" required placeholder="Add a note…"></textarea>
+    <button id="note-submit">Add note</button>
+  <% end %>
+</section>
+</div>

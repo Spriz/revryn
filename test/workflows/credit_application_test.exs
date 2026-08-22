@@ -44,6 +44,9 @@ defmodule BillingCore.Workflows.CreditApplicationTest do
 
     {:ok, credit_account} = Credits.get_or_create_account(scope, account.id, "DKK")
 
+    # SPEC §9.4.1: automatic application needs a certified settlement mode.
+    BillingCore.CreditsFixtures.settlement_policy_fixture(scope)
+
     %{scope: scope, subscription: subscription, credit_account: credit_account}
   end
 

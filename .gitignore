@@ -35,3 +35,10 @@ billing_core-*.tar
 npm-debug.log
 /assets/node_modules/
 
+priv/plts/
+
+# age identities must never enter the repo — fnox.toml holds only
+# age-ENCRYPTED values (docs/runbooks/secrets.md).
+*.agekey
+age.txt
+age-key.txt

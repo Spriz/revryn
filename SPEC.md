@@ -2,7 +2,7 @@
 document:
   id: accrual-billing-core-build-spec
   title: Accrual-Aware Billing Core — Production Build Specification
-  version: 1.7.0
+  version: 1.8.0
   status: ready-for-build
   prepared_on: 2026-08-21
   intended_audience:
@@ -13,11 +13,14 @@ document:
     - review agents
 product:
   working_name: Billing Core
+  codename: Revryn
   repository_name: accrual-billing-core
   delivery_model: open-source, self-hosted, GraphQL-first, SSR-first, multi-organization
   license: Apache-2.0
   initial_erp_adapter: e-conomic
   accounting_system_of_record: e-conomic
+  general_ledger_system_of_record: e-conomic
+  customer_credit_subledger_system_of_record: Billing Core
   payment_processing: out-of-scope
 architecture:
   style: modular-monolith-with-workers
@@ -35,25 +38,26 @@ release:
   user_membership_model: global-identity-with-organization-and-team-specific-roles
 release_gates:
   - e-conomic production application credentials and sandbox agreement
-  - accountant sign-off on recognition policies, product mappings, VAT configuration, and credit-note handling
+  - accountant sign-off on recognition policies, product mappings, VAT configuration, customer-credit liability close mappings, and credit/refund handling
   - security review and automated backup-restore-smoke validation completed
   - capacity and data-lifecycle certification accepted
 ---
 
 # Accrual-Aware Billing Core — Production Build Specification
 
-> **Build decision:** implement a deliberately small billing system rather than embedding or forking Lago. The service owns commercial billing logic and produces immutable, line-level invoice intent. e-conomic owns booked invoices, VAT/account coding, accrual postings, payments, and the accounting ledger.
+> **Build decision:** implement a deliberately small billing system rather than embedding or forking Lago. The service owns commercial billing logic and produces immutable, line-level invoice intent. For customer credits, Billing Core is the detailed subledger and e-conomic receives a reconciled monthly aggregate liability voucher plus close report. e-conomic owns booked invoices, VAT/account coding, accrual postings, payments, and the general ledger.
 
 ## 1. Executive decision
 
-Build an open-source, GraphQL-first billing core with four responsibilities:
+Build an open-source, GraphQL-first billing core with five responsibilities:
 
 1. Model customers, contracts, subscriptions, products, prices, discounts, service periods, and usage.
 2. Calculate deterministic invoice lines, including proration and tiered pricing.
 3. Synchronize those lines to e-conomic as draft invoices, preserving the service period on every over-time revenue line.
 4. Reconcile the generated invoice against the booked e-conomic invoice and create compensating credit documents when correction is required.
+5. Maintain an append-only, per-customer credit subledger and close its total outstanding liability monthly into e-conomic at aggregate level, with no customer-level credit rows posted to the ERP.
 
-The service **must not** become a payment processor, general ledger, tax engine, or revenue-recognition engine. It sends the facts needed by e-conomic to perform the accounting treatment.
+The service **must not** become a payment processor, general ledger, tax engine, or revenue-recognition engine. Its only direct general-ledger write in v1 is the narrowly defined monthly customer-credit liability close. It sends invoice facts and credit-close evidence needed by e-conomic to perform the accounting treatment.
 
 ### 1.1 What “ready for build” means
 
@@ -74,12 +78,12 @@ The machine-readable task DAG in section 28 remains authoritative for exact task
 
 | Phase | Goal | Build/read focus | Exit gate |
 |---|---|---|---|
-| **Phase 0 — decisions and executable skeleton** | Establish the repository, native Phoenix conventions, architecture gates, CI, database, tenant/security skeleton, observability baseline, and single-image runtime. | Read sections **1–7**, **12**, **19**, **22–24**, **26–28**. Implement M0 foundation tasks, state-machine tooling spike, organization/team/user skeleton, passkey/SMTP test harnesses, design-system skeleton, Oban/Telemetry/OpenTelemetry/Prometheus baseline, fake external dependencies, and Playwright harness. | **M0 — executable skeleton** |
+| **Phase 0 — decisions and executable skeleton** | Establish the repository, native Phoenix conventions, architecture gates, CI, database, tenancy/security skeleton, observability baseline, and single-image runtime. | Read sections **1–7**, **12**, **19**, **22–24**, **26–28**. Implement M0 foundation tasks, state-machine tooling spike, organization/team/user skeleton, passkey/SMTP test harnesses, design-system skeleton, Oban/Telemetry/OpenTelemetry/Prometheus baseline, fake external dependencies, and Playwright harness. | **M0 — executable skeleton** |
 | **Phase 1 — deterministic domain kernel** | Make all billing mathematics and persisted lifecycle semantics deterministic before external side effects exist. | Sections **5**, **8–11**, **13**, **15**. Build money/period primitives, products/prices, subscriptions, state machines, usage canonicalization, pricing, tiers, discounts, proration, customer-credit ledger semantics, domain events, and property/golden tests. | **M1 — deterministic domain kernel** |
 | **Phase 2 — invoice intent** | Produce immutable, reproducible invoice intent and previews without depending on e-conomic. | Sections **7–10**, **13**, **15**, **18**, **23**. Build billing runs, line generation, customer-credit grants/application/disposition plus credit-note/correction semantics, durable operations, scheduler/concurrency rules, preview workflows, workflow integration tests, and Playwright user journeys. | **M2 — invoice-intent ready** |
 | **Phase 3 — ERP adapter and reconciliation** | Prove the complete draft synchronization boundary against fake ERP first, then e-conomic sandbox. | Sections **16–18**, **21–23**, **25**. Implement ERP port, e-conomic adapter, idempotency, line-level accruals, read-back, webhook/poll reconciliation, unknown-outcome handling, failure inbox, and operator remediation. | **M3 — e-conomic draft ready** |
-| **Phase 4 — booking and corrections** | Complete irreversible accounting workflows safely. | Sections **4**, **11**, **16–18**, **25**. Add approval, booking, reconciliation of booked invoices, partial/full credits, replacement documents, closed-period behavior, and accountant-facing workflows. | **M4 — booking and correction ready** |
-| **Phase 5 — product surfaces and automation interfaces** | Finish the supported human and machine interfaces over stable domain behavior. | Sections **14**, **19**, **22–23**, plus CLI/MCP requirements in sections **8**, **12**, and **28**. Complete LiveView operations/admin UX, GraphQL, `billingctl`, MCP semantic tools, authorization, design-system stories, docs, and end-to-end interface tests. | Interface certification within M5 |
+| **Phase 4 — booking, corrections, and credit close** | Complete irreversible accounting workflows safely. | Sections **4**, **11**, **16–18**, **25**. Add approval, booking, reconciliation of booked invoices, partial/full credits, replacement documents, the monthly aggregate customer-credit liability close, closed-period behavior, and accountant-facing workflows. | **M4 — booking, correction, and credit-close ready** |
+| **Phase 5 — product surfaces and automation interfaces** | Finish the supported human and machine interfaces over stable domain behavior. | Sections **14**, **19**, **22–23**, plus CLI/MCP requirements in sections **8**, **12**, and **28**. Complete LiveView operations/admin UX, GraphQL, `revryn`, MCP semantic tools, authorization, design-system stories, docs, and end-to-end interface tests. | Interface certification within M5 |
 | **Phase 6 — operability and production hardening** | Prove the system is boring to run, recover, diagnose, upgrade, and support. | Sections **19–27**, **29–30**. Exercise backup→clean restore→smoke validation, doctor command, metrics/traces/log correlation, queue failure recovery, security review, performance/capacity, data retention, deployment, migrations, and runbooks. | **M5 — production ready** |
 | **Phase 7 — showcase SaaS certification** | Prove adoption using three independently useful B2B SaaS products and different billing models. | Showcase requirements in section **8**, architecture constraints in **12**, testing in **23**, and agent tasks in **28**. Build each showcase **standalone first**, certify with Playwright, then add its Billing Core GraphQL integration only at the end. | **M6 — showcase certification** |
 
@@ -113,7 +117,7 @@ organization + Default team
   → Playwright workflow passes
 ```
 
-Once this slice is reliable, add tiering, metered usage, discounts, proration, credits, booking, CLI/MCP, and showcase complexity in the phase order above. This deliberately proves the accounting and operational spine before increasing pricing breadth.
+Once this slice is reliable, add tiering, metered usage, discounts, proration, the customer-credit subledger and monthly liability close, booking, CLI/MCP, and showcase complexity in the phase order above. This deliberately proves the accounting and operational spine before increasing pricing breadth.
 
 ### 1.3 Primary design constraint
 
@@ -128,6 +132,17 @@ The e-conomic adapter converts the canonical half-open period `[start, end)` int
 canonical service period:  [2026-09-15, 2027-09-15)
 e-conomic accrual period:   2026-09-15 through 2027-09-14
 ```
+
+Customer-credit accounting follows a different granularity rule. Billing Core retains every customer-level credit transaction, while e-conomic receives a monthly close per team and currency. The report carries both the economic movement and the signed amount sent to the liability-account line so debit/credit direction is never inferred from prose:
+
+```text
+opening outstanding credit = prior accepted month's closing balance
+closing outstanding credit = current month's closing balance
+liability change           = closing - opening       # positive means the company owes customers more
+e-conomic liability amount = opening - closing       # canonical debit-positive signed line
+```
+
+The last expression is the requested `last_month_balance - current_balance` amount. The adapter must sandbox-certify how that canonical debit-positive sign maps to e-conomic's finance-voucher payload. The balancing side is aggregate and accounting-policy driven; it may be one configured clearing-account line or a small set of movement-class lines, but never one line per customer or credit grant.
 
 ### 1.4 Why this is not “rebuilding Lago”
 
@@ -147,7 +162,9 @@ The product intentionally excludes broad billing-platform features such as payme
 - Optionally book and send invoices through e-conomic after policy checks.
 - Reconcile both draft and booked invoices against the original invoice intent.
 - Correct booked documents only through compensating credit documents.
-- Maintain an immutable operational audit trail without pretending to be the accounting ledger.
+- Maintain customer-level credit balances through an append-only, currency-scoped subledger.
+- Produce, approve, post, attach, and reconcile a monthly aggregate customer-credit liability close in e-conomic.
+- Maintain an immutable operational audit trail and a narrowly scoped customer-credit accounting subledger without becoming the general ledger.
 - Make the ERP integration replaceable through a stable adapter contract.
 - Be deployable as a small, self-hosted open-source system.
 - Support organizations containing multiple teams, and shared commercial accounts.
@@ -164,7 +181,7 @@ The product intentionally excludes broad billing-platform features such as payme
 - Card, bank, or direct-debit collection.
 - Payment method storage.
 - Payment retries or dunning.
-- General-ledger journal creation.
+- General-ledger journal creation other than the narrowly defined monthly customer-credit liability close.
 - Monthly revenue schedule calculation.
 - Tax determination or VAT legal advice.
 - Entitlements or feature gating.
@@ -194,6 +211,7 @@ The product intentionally excludes broad billing-platform features such as payme
 - All mutating public API calls require an idempotency key.
 - All money calculations use integers for currency minor units plus arbitrary-precision decimals for intermediate quantities and rates.
 - Draft-first synchronization is the default. Auto-booking is disabled unless explicitly enabled by policy.
+- Customer-credit balances close monthly per team and currency. e-conomic receives aggregate finance-voucher entries and an attached close report, never customer-level credit-ledger rows.
 
 ## 3. Source-of-truth matrix
 
@@ -211,6 +229,8 @@ The product intentionally excludes broad billing-platform features such as payme
 | Booked invoice number and booked lines | e-conomic | Read, reconcile, never overwrite |
 | VAT calculation and VAT posting | e-conomic | Supply customer/product facts only |
 | Accrual/deferred-revenue postings | e-conomic | Supply service dates and mapped product |
+| Customer-credit grants, applications, expiries, refunds, and per-customer balances | Billing Core | Act as the authoritative detailed credit subledger and retain immutable transaction evidence |
+| Customer-credit liability balance in the general ledger | e-conomic | Calculate the monthly close, post/reconcile an aggregate voucher, and attach the immutable close report |
 | Payment and outstanding balance | e-conomic or payment system | Out of scope; may be read later |
 | Invoice PDF, email, EAN/e-invoice delivery | e-conomic | Request only when booking policy allows |
 | Accounting periods and closed periods | e-conomic | Read before booking and reconciliation |
@@ -221,17 +241,21 @@ The product intentionally excludes broad billing-platform features such as payme
 
 ## 4. Accounting and legal boundary
 
-Billing Core is designed as a commercial billing calculator and integration service. It does not expose general-ledger posting, does not claim to be the statutory bookkeeping system, and does not calculate recognized revenue by month.
+Billing Core is designed as a commercial billing calculator, integration service, and narrowly scoped customer-credit subledger. It does not claim to be a complete or standalone statutory bookkeeping system and does not calculate recognized revenue by month. The only v1 general-ledger posting it originates is the monthly aggregate adjustment of the customer-credit liability balance.
 
-The implementation must nevertheless preserve a strong transaction and control trail:
+The combined e-conomic + Billing Core setup must preserve a strong transaction and control trail:
 
 - every calculation must be reproducible from a versioned input snapshot;
+- every individual credit grant, reservation, application, release, refund, expiry, and adjustment is recorded separately in Billing Core;
+- every monthly e-conomic credit-liability voucher links to an immutable close report, report hash, period, currency, policy version, and the exact underlying subledger transaction set;
 - every external request and response must be attributable to a team, actor, operation, and idempotency key;
-- corrections must create a new version or compensating document rather than erase history;
-- invoice intent, line derivations, mappings, and synchronization evidence must be retained under a configurable retention policy approved by accounting;
-- final accounting evidence remains in e-conomic.
+- corrections must create a new version, reversal, or compensating document rather than erase history;
+- invoice intent, line derivations, credit transactions, close reports, mappings, and synchronization evidence must be retained under an accounting-approved financial retention policy;
+- e-conomic is authoritative for the general ledger and posted voucher; Billing Core is authoritative for customer-level credit detail and the close calculation.
 
-The product must not encode statements such as “all annual subscriptions must always use rule X.” Recognition policy is configured per product/price component and approved by the team’s accountant.
+The monthly liability voucher is aggregate, normally one close per team and currency. The attached report provides opening balance, movement bridge, closing balance, liability change, signed e-conomic liability-account amount, counts, hashes, and drill-down references. No customer-level rows are posted as part of this liability close. Any customer-specific credit note or receivable settlement required to correct VAT/revenue or clear an open invoice is a separate document/workflow and must reconcile through the configured clearing policy. The release gate requires a Danish accountant to approve the actual chart of accounts, debit/credit sign mapping, VAT/correction, settlement, refund, expiry, and close procedure.
+
+The product must not encode statements such as “all annual subscriptions must always use rule X.” Recognition and accounting policy is configured and versioned, then approved by the team’s accountant.
 
 ## 5. Product principles and invariants
 
@@ -287,10 +311,14 @@ The following are non-negotiable implementation invariants.
 47. **INV-047 — PostgreSQL is authoritative for durable state-machine state.** Runtime processes, caches, and FSM libraries may assist execution and validation but cannot be the sole authority for financially or user-significant state. State transitions that matter must commit atomically with their durable audit/event evidence.
 48. **INV-048 — Domain events describe facts, not hidden control flow.** Successful domain transitions emit versioned past-tense domain events through the transactional outbox when downstream work or integration is required. Domain invariants are enforced synchronously in the owning transaction and must not depend on eventually delivered events.
 49. **INV-049 — Event driven does not imply event sourced.** PostgreSQL row state remains the v1 system of record. Event sourcing/CQRS frameworks are not introduced unless a future ADR demonstrates replay, temporal reconstruction, or independent projection requirements that materially outweigh operational complexity.
-50. **INV-050 — Customer credit is money-like value, not a negative invoice.** A customer credit balance is represented by an immutable credit ledger with explicit origin, currency, remaining amount, expiry/refund policy, and accounting references. Credit notes may fund the ledger, but the ledger and the ERP credit document are distinct concepts.
+50. **INV-050 — Customer credit is money-like settlement value, not a discount or negative invoice.** A customer credit balance is represented by an immutable credit ledger with explicit origin, currency, remaining amount, expiry/refund policy, and accounting references. Applying credit does not silently reduce revenue, taxable consideration, or VAT-bearing charge lines. Credit notes and customer-receivable settlements may fund or consume the ledger, but the ledger and those ERP documents are distinct concepts.
 51. **INV-051 — Credits never silently disappear.** Every grant, reservation, application, release, refund, expiry, write-off, or manual adjustment is append-only, auditable, idempotent, and traceable to the originating commercial event and resulting accounting action.
 52. **INV-052 — Credit consumption is deterministic.** Credits are currency-scoped and applied according to an explicit allocation policy (default: earliest-expiring eligible credit first), never below zero, and never across currencies without an explicit future FX policy.
 53. **INV-053 — Subscription termination executes an explicit credit disposition policy.** Remaining customer credit is never implicitly refunded or forfeited. The configured policy determines whether it remains available, is refunded, or expires/writes off after a defined interval; execution is durable, observable, and reconcilable.
+54. **INV-054 — Customer-credit liability posting is monthly and aggregate.** Billing Core posts no customer-level credit grants, applications, or balances as lines in the e-conomic liability-close voucher. Each team and currency closes to at most one authoritative monthly credit-liability voucher, except explicit reversal/replacement vouchers. This does not suppress a legally or operationally required customer credit note or receivable-settlement document.
+55. **INV-055 — Credit-close continuity and sign semantics are exact.** For every team and currency, a period's opening balance equals the prior accepted period's closing balance, `liability_change = closing_balance - opening_balance`, and the canonical debit-positive e-conomic liability line is `opening_balance - closing_balance`. Closing outstanding credit includes both available and reserved credit; reserve/release movements have zero liability effect. Cross-currency netting is prohibited.
+56. **INV-056 — The close report is accounting evidence.** Every posted credit close has an immutable human-readable report and machine-readable detail whose hashes bind the ERP voucher to the exact ledger transactions and accounting-policy version used.
+57. **INV-057 — Posted credit closes are corrected, never rewritten.** After posting, a close cannot be recalculated in place, backdated transactions cannot be inserted into it, and corrections use an explicit reversal/replacement or current-period prior-period adjustment. The credit-liability close is VAT-neutral and never substitutes for a legally required invoice or credit note.
 
 ## 6. Actors and roles
 
@@ -798,7 +826,7 @@ Acceptance criteria:
 - The discount currency matches the subscription currency.
 - Allocation across eligible lines is proportional by pre-discount net amount unless an explicit allocation is supplied.
 - The largest-remainder method assigns residual minor units deterministically.
-- A discount cannot reduce an invoice below zero unless credit-balance behavior is explicitly enabled in a later release.
+- A discount alone cannot reduce an invoice below zero. Any excess commercial value is rejected or becomes an explicit customer-credit grant under a separately approved policy; it is never created implicitly by discount arithmetic.
 
 #### BC-US-062 — Limit discount duration (`P0`)
 
@@ -1099,6 +1127,8 @@ Acceptance criteria:
 - A billing run reserves credit transactionally before external side effects and finalizes the debit only when the invoice intent is frozen according to the documented workflow. Failed/superseded workflows release reservations idempotently.
 - An invoice cannot consume more credit than its eligible payable amount, and a credit balance cannot become negative under concurrent billing runs.
 - Invoice previews show gross charges, credits applied, and remaining amount due separately.
+- Applying customer credit is a settlement event, not a discount: gross charge lines, recognition periods, revenue classification, and VAT basis remain unchanged unless a separate correction/credit-note workflow explicitly changes them.
+- The accounting policy declares which system owns open receivables. When e-conomic owns them, credit consumption must create or reference an idempotent customer settlement against the configured clearing account; when another payment/receivables system owns them, Billing Core stores and reconciles that external settlement reference. The monthly aggregate liability close alone never marks an invoice paid.
 
 #### BC-US-109 — Configure remaining-credit disposition when a subscription/customer relationship ends (`P0`)
 
@@ -1113,6 +1143,59 @@ Acceptance criteria:
 - Policy changes are versioned and do not retroactively change already-created credit grants unless an authorized explicit migration/adjustment is performed.
 - The UI, GraphQL, CLI, and MCP expose the current balance, pending reservations, expiries, disposition policy, and transaction history subject to authorization.
 - Accounting treatment of refunds, expiry/write-off, VAT, and recognized income is adapter/policy driven and requires accountant sign-off; the billing engine must not hard-code a jurisdictional accounting conclusion.
+
+#### BC-US-163 — Generate a monthly customer-credit close (`P0`)
+
+As a finance operator, I can generate a deterministic monthly close of outstanding customer credits without posting customer-level rows to the ERP.
+
+Acceptance criteria:
+
+- The close is scoped to one team, accounting month, and currency; currencies are never netted together.
+- Opening balance equals the previous accepted close's closing balance, or an explicitly imported opening balance for the first close.
+- The report shows grants, applications, releases, refunds, expiries, positive/negative adjustments, opening balance, closing balance, transaction counts, and `net_change = closing - opening`.
+- The close binds the exact included credit transactions through immutable membership rows and a deterministic ledger snapshot hash.
+- Concurrent close attempts for the same team, month, and currency cannot produce two accepted closes.
+- A zero-change month still produces a close report; whether a zero-value ERP voucher is posted is policy controlled.
+
+#### BC-US-164 — Post the aggregate customer-credit liability to e-conomic (`P0`)
+
+As a finance operator, I can post the approved monthly credit close to e-conomic as aggregate finance-voucher entries with the report attached.
+
+Acceptance criteria:
+
+- The voucher contains one net adjustment to the configured customer-credit liability account for the currency and period; its canonical debit-positive signed amount is exactly `opening_balance - closing_balance`.
+- The balancing side is aggregate and follows the accepted accounting-policy version; it may be a single configured offset or movement-class summary lines, never customer-level lines.
+- Positive net change increases the liability; negative net change reduces it, using an explicit tested sign convention.
+- The voucher text contains a stable close reference, and a PDF close report is attached to the e-conomic voucher.
+- The write uses a durable operation and stable idempotency key. A timeout after possible commit enters `outcome_unknown` and reconciles before retrying.
+- The journal number, liability account, contra-account policy, posting date, VAT-neutral treatment, and zero-delta behavior are validated during preflight.
+
+#### BC-US-165 — Reconcile and correct a monthly customer-credit close (`P0`)
+
+As a finance operator, I can prove that the e-conomic voucher matches the Billing Core close and correct discrepancies without rewriting history.
+
+Acceptance criteria:
+
+- Reconciliation reads the authoritative e-conomic voucher and compares period, currency, accounts, sign, amounts, stable reference, and attachment metadata against the frozen close.
+- The close's economic movement is `closing - opening`, while the canonical debit-positive liability-account line sent to e-conomic is exactly `opening - closing`; direction, magnitude, report hash, and subledger closing balance remain reproducible.
+- A posted close is immutable. Corrections create a reversal/replacement voucher or an explicitly approved current-period prior-period adjustment.
+- Transactions recorded after a closed cutoff cannot be backdated silently into the closed period.
+- LiveView, GraphQL, `revryn`, and MCP expose close status, report download, reconciliation result, and safe remediation according to role.
+- Playwright covers generate → approve → post → attach → reconcile and at least one timeout/unknown-outcome recovery path.
+
+#### BC-US-166 — Reach a trustworthy first-run proof with a demo ERP (`P0`)
+
+As a prospective operator, I can explore a realistic, isolated Revryn workspace and understand how commercial billing, customer credit, and aggregate ERP accounting reconcile before I provide real ERP credentials.
+
+Acceptance criteria:
+
+- A purposeful first-run empty state offers a guided demo workspace and a clearly distinct real-ERP setup path.
+- The demo uses visibly synthetic data but executes the ordinary scoped domain commands, adapter port, durable operations, idempotency, attachments, and authoritative read-after-write reconciliation.
+- The guided story covers product/customer/subscription setup, invoice preview/freeze, ERP draft and booking, customer-credit application, monthly aggregate credit close, voucher attachment, and reconciliation.
+- Cause and effect remain inspectable through linked source inputs, calculation trace, invoice, credit movements, close bridge, voucher, attachment, hashes, and reconciliation evidence.
+- Demo state is isolated per team and connection, survives interruption, resumes deterministically, and resets by creating a new generation rather than deleting immutable financial history.
+- Playwright covers clean-install happy path and a recoverable provider failure; activation evidence tracks time to first reconciled invoice and customer-credit close.
+- Product copy, visual hierarchy, empty states, feedback, and sample data pass qualitative review for clarity and specificity and do not resemble generic generated dashboard filler.
 
 ### 8.8 Epic H — Operations, audit, and reporting
 
@@ -1518,7 +1601,7 @@ As an engineer or operator, I can administer and automate Billing Core from a st
 
 Acceptance criteria:
 
-- The official command is `billingctl`; it is implemented in Go using Cobra unless a future ADR demonstrates a materially better cross-platform option.
+- The official command is `revryn`; it is implemented in Go using Cobra unless a future ADR demonstrates a materially better cross-platform option.
 - Release artifacts include Linux amd64/arm64, macOS amd64/arm64, and Windows amd64 binaries plus checksums/signatures/SBOM metadata.
 - Authentication supports explicit profile/config, environment variables, and non-interactive service credentials; secrets are never accepted in shell history when a safer input mechanism exists.
 - Commands cover login/profile, organization/team selection, customers, products/plans, subscriptions, usage import, invoice preview/status, operations/failures, reconciliation, diagnostics, backup/restore orchestration, and schema/capability inspection as applicable.
@@ -1533,7 +1616,7 @@ As an AI agent or agent-enabled developer tool, I can use Billing Core through d
 Acceptance criteria:
 
 - The MCP implementation uses the official Tier-1 Go MCP SDK and tracks the current supported MCP specification; the reviewed baseline is MCP `2026-07-28`.
-- The same Go codebase as `billingctl` provides `billingctl mcp serve` and a separately runnable `mcp` image role; stdio is supported for local tools and stateless Streamable HTTP for remote deployments.
+- The same Go codebase as `revryn` provides `revryn mcp serve` and a separately runnable `mcp` image role; stdio is supported for local tools and stateless Streamable HTTP for remote deployments.
 - MCP tools are domain-semantic operations such as inspecting a customer/subscription, previewing billing impact, listing failed operations, retrying a safe operation, or preparing an invoice action; arbitrary GraphQL passthrough is prohibited.
 - Tool schemas are strongly typed, descriptions state side effects and required scope, pagination is bounded, and returned data is minimized for agent use.
 - Read-only and mutating tool capabilities can be independently granted to machine identities. Sensitive/accounting actions require explicit confirmation semantics and preserve idempotency/audit evidence.
@@ -1664,6 +1747,9 @@ Acceptance criteria:
 - **Credit grant:** immutable creation of spendable customer credit, usually originating from unused prepaid service, goodwill, or an externally reconciled correction.
 - **Credit ledger transaction:** append-only grant, reservation, application, release, refund, expiry/write-off, or authorized adjustment affecting a customer credit account.
 - **Credit disposition policy:** versioned rule describing what happens to remaining credit when the relevant subscription/commercial relationship ends: retain, refund, or expire after a configured interval.
+- **Customer-credit close:** immutable monthly snapshot for one team and currency that binds opening balance, included ledger transactions, closing balance, net liability change, and accounting-policy version.
+- **Credit close report:** human-readable accounting attachment plus machine-readable detail that explains the monthly movement and links the aggregate ERP voucher back to individual subledger transactions.
+- **Credit-liability voucher:** aggregate e-conomic finance voucher that adjusts the configured customer-credit liability account to the monthly subledger closing balance; it contains no customer-level credit rows.
 
 ### 9.1.1 Organization, team, account, and identity hierarchy
 
@@ -1746,9 +1832,20 @@ Rules:
 - `over_time` lines require service start and exclusive service end.
 - In v1, `point_in_time` means recognition on the e-conomic invoice date. The core does not claim or transmit a different point-in-time recognition date that the ERP cannot honor.
 - A commercial event that must be recognized on another date must be invoiced on that date or represented through an accountant-approved over-time policy; it is never silently approximated.
-- Discount and credit lines inherit the recognition mode and service period of the revenue lines they adjust.
+- Discount lines and correction credit-note lines inherit the recognition mode and service period of the revenue lines they adjust. Customer-credit application is settlement value and is not rendered as a revenue-adjusting invoice line by default.
 - One invoice may contain both point-in-time and over-time lines.
 - Billing Core does not create monthly revenue entries.
+
+#### 9.4.1 Customer-credit settlement versus liability close
+
+The customer-credit subledger, customer invoice, receivable settlement, and monthly liability close are four related but distinct records:
+
+1. Charge/invoice lines describe the supplied service and preserve the full revenue/VAT facts.
+2. A customer-credit application consumes money-like value and reduces new cash due; it is not a discount.
+3. If the authoritative receivables system requires it, an idempotent customer settlement clears the relevant invoice through an accountant-approved clearing account or equivalent provider mechanism.
+4. The month-end close posts only the aggregate movement of total outstanding customer-credit liability. It reconciles the clearing account and detailed subledger but does not itself settle individual invoices.
+
+A deployment must select and certify one receivable-settlement mode before enabling automatic credit application. The system blocks rather than netting an invoice silently when the chosen mode cannot preserve revenue, VAT, customer balance, and liability reconciliation.
 
 ### 9.5 Billing interval model
 
@@ -1983,15 +2080,46 @@ stateDiagram-v2
   available --> expiry_scheduled: termination policy = expire_after
   partially_spent --> expiry_scheduled: schedule remaining balance expiry
   expiry_scheduled --> available: authorized policy reversal before deadline
-  expiry_scheduled --> expired: deadline reached + accounting action recorded
+  expiry_scheduled --> expired: deadline reached + ledger transaction recorded
   spent --> [*]
   refunded --> [*]
   expired --> [*]
 ```
 
-The ledger, not this projection alone, is the audit evidence. No transition may reduce spendable credit without an append-only ledger transaction. Refund and expiry transitions are financially significant durable operations and follow the same retry/reconciliation rules as ERP writes.
+The ledger, not this projection alone, is the audit evidence. No transition may reduce spendable credit without an append-only ledger transaction. Refund and expiry transitions are financially significant durable operations. Their customer-level detail remains in Billing Core and their liability effect is included in the next monthly credit close; actual cash refunds and any required invoice/credit-note corrections remain separate durable workflows.
 
-### 11.5 State-machine implementation policy
+### 11.5 Monthly customer-credit close lifecycle
+
+The monthly close is a persisted accounting workflow, not an ad-hoc report query. One lifecycle exists per team, accounting month, and currency.
+
+```mermaid
+stateDiagram-v2
+  [*] --> open
+  open --> calculating: cutoff reached / manual request
+  calculating --> ready: snapshot + report hash frozen
+  calculating --> failed: invalid continuity or ledger divergence
+  failed --> calculating: issue corrected + authorized retry
+  ready --> approved: finance approval
+  ready --> superseded: recalculate before posting
+  approved --> posting: durable ERP operation starts
+  posting --> posted: voucher created + report attached
+  posting --> outcome_unknown: response missing after possible commit
+  outcome_unknown --> posted: authoritative voucher found
+  outcome_unknown --> posting: absence proven + same idempotency key
+  posted --> reconciled: voucher and attachment match
+  posted --> mismatch: read-back differs
+  mismatch --> reconciled: explicit remediation completes
+  reconciled --> closed: finance accepts period
+  closed --> reversal_pending: correction required
+  reversal_pending --> reversed: reversal/replacement reconciled
+  superseded --> [*]
+  closed --> [*]
+  reversed --> [*]
+```
+
+The close freezes a transaction cutoff, transaction membership set, policy version, opening/closing balances, movement totals, and hashes before any ERP write. Once posted, it is immutable. Late or backdated source events become current-period prior-period adjustments unless finance explicitly executes the reversal/replacement workflow.
+
+### 11.6 State-machine implementation policy
 
 State machines are a domain-design primitive, not merely diagrams. For any non-trivial lifecycle, the implementation must define a finite set of states, domain events/commands that request transitions, allowed transitions, guards, terminal states, and transition-produced effects. The same definition must be usable to produce or validate the lifecycle diagram in the feature documentation.
 
@@ -2007,7 +2135,7 @@ The default implementation model is **transactional and database-backed**:
 
 A BEAM process may cache or coordinate work, but the application must recover the correct lifecycle from PostgreSQL after killing every application process. One-process-per-aggregate is not a v1 correctness assumption.
 
-### 11.6 Tooling decision gate
+### 11.7 Tooling decision gate
 
 Perform an early implementation spike before broad domain work. Evaluate **Finitomata** first because it is actively maintained, supports textual FSM definitions and generated diagrams, transition guards/callbacks, telemetry hooks, testing support, and a persistence behaviour. Do not adopt it merely for syntax: adoption requires proving that Ecto/PostgreSQL can remain the transaction and concurrency authority.
 
@@ -2015,7 +2143,7 @@ If Finitomata's process-oriented runtime or persistence hooks make atomic Ecto d
 
 Use OTP `:gen_statem` directly only when the thing being modeled is inherently a live process/protocol with timeouts/postponed events—for example a bounded connector session—not for ordinary subscriptions or invoices stored in PostgreSQL.
 
-### 11.7 Event-driven architecture boundary
+### 11.8 Event-driven architecture boundary
 
 Billing Core is **event-driven at integration boundaries, not event-sourced internally**. A successful transaction may append one or more immutable domain-event envelopes to the transactional outbox. Events are named as facts (`subscription.activated.v1`, `invoice_intent.frozen.v1`, `operation.blocked.v1`) and carry correlation/causation metadata.
 
@@ -2050,8 +2178,8 @@ The normative v1 implementation is an Elixir/Phoenix modular monolith. The boots
 | Web framework | Phoenix 1.8 using Bandit, the current Phoenix generator default HTTP server |
 | Human UI | Phoenix LiveView 1.2 + HEEx; SSR-first, no SPA framework |
 | Public application API | GraphQL with Absinthe 1.11 and `absinthe_plug`; `/graphql` remains the typed general-purpose machine API |
-| CLI | Go + Cobra, shipped as `billingctl`; standalone cross-platform binaries and included in the official OCI image |
-| Agent interface | MCP using the official Tier-1 Go SDK; `billingctl mcp serve` plus an `mcp` image role; stdio and stateless Streamable HTTP |
+| CLI | Go + Cobra, shipped as `revryn`; standalone cross-platform binaries and included in the official OCI image |
+| Agent interface | MCP using the official Tier-1 Go SDK; `revryn mcp serve` plus an `mcp` image role; stdio and stateless Streamable HTTP |
 | Provider integration | Provider-native protocols; e-conomic remains a REST client behind the ERP adapter |
 | Database | PostgreSQL; bundled in all-in-one image, external PostgreSQL supported for split/HA deployments |
 | Persistence | Ecto with explicit context/repository boundaries; financial invariants are also enforced with database constraints where practical |
@@ -2067,7 +2195,7 @@ The normative v1 implementation is an Elixir/Phoenix modular monolith. The boots
 | GraphQL schema artifact | Absinthe schema export/SDL checked into or generated deterministically in CI and diffed for compatibility |
 | Marketing site | Astro consumes explicitly public Markdown feature docs as content; it is not part of the product runtime |
 | Telemetry | `:telemetry` as the internal instrumentation contract; OpenTelemetry/OTLP export, Prometheus-compatible metrics, LoggerJSON structured stdout logs, Phoenix LiveDashboard, and end-to-end operation correlation |
-| Packaging | One signed OCI image supporting `all-in-one`, `web`, `worker`, `migrate`, `backup`, `restore`, `smoke-test`, and `mcp` roles; `billingctl` is embedded and also released standalone |
+| Packaging | One signed OCI image supporting `all-in-one`, `web`, `worker`, `migrate`, `backup`, `restore`, `smoke-test`, and `mcp` roles; `revryn` is embedded and also released standalone |
 | All-in-one runtime | Phoenix release + worker + supervised PostgreSQL in one container, one documented persistent volume root |
 | Identity | Passkey-first WebAuthn + TOTP/recovery for local humans; optional OIDC federation; OAuth2/client credentials or signed service tokens for machine clients |
 
@@ -2118,18 +2246,21 @@ Patch/minor dependency updates are automated only when CI, GraphQL compatibility
 
 The first-class CLI and MCP server are intentionally implemented in **Go**, not Elixir. Elixir release commands and escripts remain useful for internal maintenance, but the external CLI must be easy to distribute as a single native binary across developer laptops, CI runners, containers, and air-gapped environments. Go also provides an official Tier-1 MCP SDK, allowing one small companion codebase to serve both human automation and agentic clients.
 
-Repository layout:
+Repository layout (the companion is an isolated Go module so the Phoenix
+application and Go sources are not interleaved at the repository root):
 
 ```text
-cmd/billingctl/          # Go CLI entry point
-internal/client/         # authenticated Billing Core client, retry/idempotency/correlation
-internal/commands/       # Cobra commands and stable structured-output DTOs
-internal/mcp/            # MCP tools/resources/auth/transport
-contracts/cli/           # JSON schemas, exit-code registry, golden examples
-contracts/mcp/           # tool/resource metadata and compatibility fixtures
+clients/revryn/
+  go.mod                 # independent Go module boundary
+  cmd/revryn/        # Go CLI entry point
+  internal/client/       # authenticated Revryn client, retry/idempotency/correlation
+  internal/commands/     # Cobra commands and stable structured-output DTOs
+  internal/mcp/          # MCP tools/resources/auth/transport
+  contracts/cli/         # JSON schemas, exit-code registry, golden examples
+  contracts/mcp/         # tool/resource metadata and compatibility fixtures
 ```
 
-`billingctl` uses the public GraphQL contract for general application operations. The MCP adapter uses the same authenticated client/domain capabilities but exposes **semantic MCP tools**, never an `execute_graphql` escape hatch. This preserves a single server-side domain model while allowing agent clients to interact at a safer abstraction level.
+`revryn` uses the public GraphQL contract for general application operations. The MCP adapter uses the same authenticated client/domain capabilities but exposes **semantic MCP tools**, never an `execute_graphql` escape hatch. This preserves a single server-side domain model while allowing agent clients to interact at a safer abstraction level.
 
 The MCP server supports:
 
@@ -2175,6 +2306,7 @@ flowchart TB
     Usage[Usage ingestion]
     Rating[Rating engine]
     Invoice[Invoice construction]
+    Credits[Customer-credit subledger and monthly close]
     Approval[Approval workflow]
     ErpPort[ERP port]
     EconAdapter[e-conomic adapter]
@@ -2195,12 +2327,16 @@ flowchart TB
   Discount --> Rating
   Usage --> Rating
   Rating --> Invoice
+  Contract --> Credits
+  Invoice --> Credits
   Invoice --> Approval
+  Credits --> ErpPort
   Approval --> ErpPort
   ErpPort --> EconAdapter
   EconAdapter --> Recon
   Recon --> Audit
   Jobs --> Rating
+  Jobs --> Credits
   Jobs --> EconAdapter
   Jobs --> Recon
 ```
@@ -2217,9 +2353,10 @@ flowchart TB
 | Usage | immutable events and corrections | Team, Contract, Catalog metric definitions |
 | Rating | pure pricing functions and calculation traces | Catalog, Contract, Discount, Usage snapshots |
 | Invoicing | billing runs, rated charges, invoice intent, normalized lines | Rating, Contract snapshots |
-| Approval | validation, approval records, correction cases | Invoicing, Team |
-| ERP | connections, operations, adapter implementation | Approval, Invoicing |
-| Reconciliation | external snapshots, comparisons, incidents | ERP, Invoicing |
+| Credits | customer-credit accounts, grants, immutable transactions, reservations, disposition policies, monthly closes, reports | Contract, Invoicing, Team |
+| Approval | validation, approval records, correction cases | Invoicing, Credits, Team |
+| ERP | connections, invoice operations, aggregate credit-close vouchers, adapter implementation | Approval, Invoicing, Credits |
+| Reconciliation | external snapshots, comparisons, incidents | ERP, Invoicing, Credits |
 | Audit | audit records, exports, read models | event subscriptions only |
 | Jobs | durable commands, retries, outbox | all modules through command handlers |
 
@@ -2247,6 +2384,8 @@ Responsibilities:
 - scheduled billing-run creation;
 - rating and invoice generation;
 - ERP writes and reads;
+- credit expiry/refund state transitions and monthly customer-credit close calculation;
+- aggregate credit-liability voucher creation, report attachment, and reconciliation;
 - retries and dead-letter handling;
 - webhook follow-up reads;
 - daily reconciliation;
@@ -2289,6 +2428,8 @@ No broker is required for v1. A later deployment may relay outbox events to Kafk
 - Commands affecting one aggregate are strongly consistent within PostgreSQL.
 - Billing-run construction uses frozen snapshots and is repeatable.
 - ERP state is eventually consistent but explicitly reconciled.
+- A customer-credit close is strongly consistent inside Billing Core before posting; its e-conomic voucher is eventually consistent until read-back reconciliation succeeds.
+- Close continuity is serialized per team and currency, and cross-currency netting is prohibited.
 - Read models may lag by seconds and expose their `as_of` timestamp.
 - No user-facing status claims success before the corresponding authoritative transition is persisted.
 
@@ -2334,9 +2475,9 @@ This sequencing prevents the examples from becoming artificial API demos and pro
 
 ```mermaid
 erDiagram
-  TENANT ||--o{ ERP_CONNECTION : has
-  TENANT ||--o{ CUSTOMER : owns
-  TENANT ||--o{ PRODUCT : owns
+  TEAM ||--o{ ERP_CONNECTION : has
+  TEAM ||--o{ CUSTOMER : owns
+  TEAM ||--o{ PRODUCT : owns
   PRODUCT ||--o{ PRODUCT_ERP_MAPPING : maps
   PRODUCT ||--o{ PRICE_COMPONENT : priced_by
   PLAN ||--o{ PLAN_VERSION : versions
@@ -2354,6 +2495,12 @@ erDiagram
   INVOICE_INTENT ||--o{ INVOICE_LINE : contains
   INVOICE_INTENT ||--o{ DISCOUNT_APPLICATION : applies
   INVOICE_INTENT ||--o{ ERP_DOCUMENT : synchronized_as
+  CUSTOMER ||--o{ CUSTOMER_CREDIT_ACCOUNT : owns
+  CUSTOMER_CREDIT_ACCOUNT ||--o{ CUSTOMER_CREDIT_GRANT : receives
+  CUSTOMER_CREDIT_ACCOUNT ||--o{ CUSTOMER_CREDIT_TRANSACTION : records
+  CUSTOMER_CREDIT_CLOSE ||--o{ CREDIT_CLOSE_TRANSACTION_MEMBERSHIP : binds
+  CUSTOMER_CREDIT_TRANSACTION ||--o| CREDIT_CLOSE_TRANSACTION_MEMBERSHIP : included_in
+  CUSTOMER_CREDIT_CLOSE ||--o| ERP_DOCUMENT : posted_as
   ERP_DOCUMENT ||--o{ SYNC_OPERATION : operated_by
   ERP_DOCUMENT ||--o{ RECONCILIATION_RESULT : checked_by
   INVOICE_INTENT ||--o{ CORRECTION_CASE : participates
@@ -2821,17 +2968,98 @@ create table customer_credit_transactions (
   operation_id uuid,
   reason_code text,
   actor_reference text,
+  accounting_effective_on date not null,
   occurred_at timestamptz not null,
   metadata jsonb not null default '{}'::jsonb,
   unique (team_id, idempotency_key)
 );
 ```
 
-Credit allocation locks/version-checks the credit account and eligible grants in one transaction. The projection is updated atomically with the ledger transaction. A reconciliation check must be able to recompute `available_minor` and `reserved_minor` from immutable transactions and fail loudly on divergence. Expiry is grant-aware so later grants cannot be accidentally forfeited because an older grant expires.
+Credit allocation locks/version-checks the credit account and eligible grants in one transaction. The projection is updated atomically with the ledger transaction. A reconciliation check must be able to recompute `available_minor` and `reserved_minor` from immutable transactions and fail loudly on divergence. Expiry is grant-aware so later grants cannot be accidentally forfeited because an older grant expires. `accounting_effective_on` is assigned under the team's accounting-time-zone policy and cannot be silently changed after insertion; corrections append a new transaction.
 
 #### `credit_disposition_policy_versions`
 
 Immutable policy versions scoped to the relevant account/contract define `retain`, `refund`, or `expire_after`, including duration and effective time. Existing grants retain the policy version assigned when created unless an explicit authorized adjustment migrates them.
+
+#### `customer_credit_close_policy_versions`, `customer_credit_closes`, and close evidence
+
+A versioned close policy defines the e-conomic journal number, customer-credit liability account, posting date rule, zero-delta behavior, report format, and balancing strategy. The liability side is always one aggregate net line per team/currency/period. The balancing side may be one configured offset line or aggregate movement-class lines according to accountant-approved policy; it never contains customer-level rows.
+
+```sql
+create table customer_credit_close_policy_versions (
+  id uuid primary key,
+  team_id uuid not null,
+  version integer not null,
+  effective_from date not null,
+  journal_number integer not null,
+  liability_account_number integer not null,
+  posting_mode text not null check (posting_mode in ('single_offset','movement_class')),
+  default_offset_account_number integer,
+  movement_account_map jsonb not null default '{}'::jsonb,
+  post_zero_delta boolean not null default false,
+  vat_neutral boolean not null default true check (vat_neutral),
+  created_at timestamptz not null,
+  unique (team_id, version)
+);
+
+create table customer_credit_closes (
+  id uuid primary key,
+  team_id uuid not null,
+  currency char(3) not null,
+  period_start date not null,
+  period_end_exclusive date not null,
+  transaction_cutoff timestamptz not null,
+  policy_version_id uuid not null references customer_credit_close_policy_versions(id),
+  state text not null check (state in ('open','calculating','ready','approved','posting','outcome_unknown','posted','reconciled','closed','failed','mismatch','superseded','reversal_pending','reversed')),
+  opening_minor bigint not null check (opening_minor >= 0),
+  closing_minor bigint not null check (closing_minor >= 0),
+  net_change_minor bigint not null,
+  economic_liability_line_minor bigint not null,
+  ledger_transaction_count bigint not null check (ledger_transaction_count >= 0),
+  ledger_snapshot_hash text not null,
+  report_sha256 text,
+  report_storage_key text,
+  operation_id uuid,
+  erp_document_id uuid,
+  previous_close_id uuid references customer_credit_closes(id),
+  reversal_of_close_id uuid references customer_credit_closes(id),
+  created_at timestamptz not null,
+  closed_at timestamptz,
+  unique (team_id, currency, period_start, period_end_exclusive),
+  check (period_start < period_end_exclusive),
+  check (net_change_minor = closing_minor - opening_minor),
+  check (economic_liability_line_minor = opening_minor - closing_minor)
+);
+
+create table customer_credit_close_movements (
+  id uuid primary key,
+  team_id uuid not null,
+  close_id uuid not null references customer_credit_closes(id),
+  movement_type text not null check (movement_type in ('grant','reserve','release','apply','refund','expire','positive_adjustment','negative_adjustment','prior_period_adjustment')),
+  amount_minor bigint not null check (amount_minor >= 0),
+  liability_effect_minor bigint not null,
+  transaction_count bigint not null check (transaction_count >= 0),
+  contra_account_number integer,
+  unique (close_id, movement_type, contra_account_number)
+);
+
+create table credit_close_transaction_memberships (
+  close_id uuid not null references customer_credit_closes(id),
+  transaction_id uuid not null references customer_credit_transactions(id),
+  ledger_ordinal bigint not null,
+  primary key (close_id, transaction_id),
+  unique (transaction_id)
+);
+```
+
+The first close uses an explicitly approved imported opening balance or zero. Every later close must reference the preceding accepted close and reuse its closing balance exactly. Movement rows retain gross operational volume and signed liability effect separately: grants increase liability; applications, refunds, expiries, and negative adjustments decrease it; reservations and releases have zero liability effect. Close calculation atomically freezes the included transaction memberships and report inputs. Once a voucher is posted, neither the close nor its membership set can be updated; corrections append reversal/replacement closes or current-period prior-period adjustments.
+
+The report bundle contains at minimum:
+
+- a PDF summary suitable for attachment to the e-conomic voucher;
+- canonical JSON containing all totals, policy identifiers, hashes, and references;
+- CSV detail of the included ledger transactions for audit/export;
+- a SHA-256 manifest binding every file to the close and ERP voucher reference.
 
 #### `approval_records`
 
@@ -2843,20 +3071,29 @@ Append-only approvals and revocations with actor, reason, intent hash, ERP draft
 id uuid primary key,
 team_id uuid not null,
 erp_connection_id uuid not null,
-invoice_intent_id uuid not null,
-document_type text not null check (document_type in ('invoice', 'credit_note')),
+invoice_intent_id uuid,
+customer_credit_close_id uuid references customer_credit_closes(id),
+document_type text not null check (document_type in ('invoice', 'credit_note', 'finance_voucher')),
 state text not null,
 external_draft_number text,
 external_booked_number text,
+external_voucher_number text,
+external_accounting_year text,
 external_reference text not null,
 last_external_snapshot jsonb,
 last_external_hash text,
 last_reconciled_at timestamptz,
 unique (team_id, erp_connection_id, external_reference),
-unique (team_id, erp_connection_id, external_booked_number)
+unique (team_id, erp_connection_id, external_booked_number),
+unique (team_id, erp_connection_id, external_accounting_year, external_voucher_number),
+check (
+  (document_type in ('invoice', 'credit_note') and invoice_intent_id is not null and customer_credit_close_id is null)
+  or
+  (document_type = 'finance_voucher' and invoice_intent_id is null and customer_credit_close_id is not null)
+)
 ```
 
-The second unique constraint must permit multiple `NULL` values.
+Nullable provider-number constraints must permit multiple `NULL` values. A finance voucher is sourced from exactly one frozen customer-credit close and never from a customer-level invoice intent.
 
 #### `sync_operations`
 
@@ -3098,6 +3335,7 @@ The public schema must expose at least these capability groups:
 | Billing | `billingRun`, `invoicePreview`, `invoiceIntent`, `calculationTrace` | `createBillingRun`, `calculateBillingRun`, `closeBillingRun`, `freezeInvoiceIntent` |
 | ERP operations | `erpConnection`, `erpDocument`, `operation`, `reconciliationIncidents` | `validateErpConnection`, `synchronizeInvoice`, `approveInvoice`, `bookInvoice`, `retryOperation`, `reconcileErpDocument` |
 | Corrections | `correctionCase`, `invoiceChain` | `supersedeInvoiceIntent`, `createInvoiceCorrection`, `resolveCorrectionCase` |
+| Customer credits | `customerCreditAccount`, `customerCreditTransactions`, `customerCreditClose`, `customerCreditCloses` | `grantCustomerCredit`, `scheduleCreditDisposition`, `calculateCustomerCreditClose`, `approveCustomerCreditClose`, `postCustomerCreditClose`, `reconcileCustomerCreditClose`, `reverseCustomerCreditClose` |
 | Audit | `auditEvents`, `auditExport` | `requestAuditExport` |
 | Security/self-service | `viewer`, `sessions`, `passkeys`, `totpFactors` | `beginPasskeyRegistration`, `finishPasskeyRegistration`, `revokePasskey`, `enrollTotp`, `confirmTotp`, `revokeSession` |
 
@@ -3245,7 +3483,7 @@ Every schema change must update:
 
 GraphQL, CLI, and MCP are independently versioned public surfaces over the same server-side command model. Compatibility is therefore checked at all three layers.
 
-For `billingctl`:
+For `revryn`:
 
 - command/flag removal or semantic change is breaking unless covered by a documented deprecation window;
 - `--json` schemas are versioned artifacts and are compatibility-checked;
@@ -3306,6 +3544,15 @@ customer_credit.refund_requested.v1
 customer_credit.refunded.v1
 customer_credit.expiry_scheduled.v1
 customer_credit.expired.v1
+customer_credit_close.calculated.v1
+customer_credit_close.approved.v1
+customer_credit_close.post_requested.v1
+customer_credit_close.posted.v1
+customer_credit_close.reconciled.v1
+customer_credit_close.mismatch_detected.v1
+customer_credit_close.closed.v1
+customer_credit_close.reversal_requested.v1
+customer_credit_close.reversed.v1
 charge_instance.created.v1
 charge_instance.cancelled.v1
 usage_batch.accepted.v1
@@ -3341,6 +3588,9 @@ defmodule BillingCore.ERP.Adapter do
           supports_invoice_webhooks: boolean(),
           supports_line_accrual_periods: boolean(),
           supports_customer_provisioning: boolean(),
+          supports_customer_credit_settlements: boolean(),
+          supports_finance_vouchers: boolean(),
+          supports_voucher_attachments: boolean(),
           supported_delivery_modes: [:none | :email | :einvoice],
           amount_scale: non_neg_integer(),
           quantity_scale: non_neg_integer()
@@ -3353,10 +3603,16 @@ defmodule BillingCore.ERP.Adapter do
   @callback update_draft(connection_context(), document_ref(), canonical_invoice(), operation_key()) :: {:ok, document()} | {:unknown, recovery_hint()} | {:error, term()}
   @callback get_document(connection_context(), document_ref()) :: {:ok, document()} | {:error, term()}
   @callback book_document(connection_context(), document_ref(), booking_options(), operation_key()) :: {:ok, document()} | {:unknown, recovery_hint()} | {:error, term()}
+  @callback apply_customer_credit_settlement(connection_context(), document_ref(), canonical_credit_settlement(), operation_key()) :: {:ok, settlement()} | {:unknown, recovery_hint()} | {:error, term()}
+  @callback get_customer_credit_settlement(connection_context(), settlement_ref()) :: {:ok, settlement() | nil} | {:error, term()}
+  @callback create_finance_voucher(connection_context(), canonical_voucher(), operation_key()) :: {:ok, voucher()} | {:unknown, recovery_hint()} | {:error, term()}
+  @callback get_finance_voucher(connection_context(), voucher_ref()) :: {:ok, voucher() | nil} | {:error, term()}
+  @callback attach_voucher_report(connection_context(), voucher_ref(), canonical_report_file(), operation_key()) :: :ok | {:unknown, recovery_hint()} | {:error, term()}
+  @callback get_voucher_attachment(connection_context(), voucher_ref()) :: {:ok, attachment_metadata() | nil} | {:error, term()}
 end
 ```
 
-Canonical ERP invoice and line structs contain only domain-level values: stable operation/reference keys, document type, customer identity/snapshot, invoice date, currency, payment/layout references, delivery mode, normalized line amounts/quantities, product mapping, description, recognition mode, and optional canonical service period. Monetary values use integer minor units plus explicit currency; quantities/rates use `Decimal`. Provider-specific JSON field names exist only inside the concrete adapter.
+Canonical ERP invoice and line structs contain only domain-level values: stable operation/reference keys, document type, customer identity/snapshot, invoice date, currency, payment/layout references, delivery mode, normalized line amounts/quantities, product mapping, description, recognition mode, and optional canonical service period. The canonical finance-voucher model contains a stable close reference, accounting date/year, currency, aggregate account/contra-account lines, signed minor-unit amounts, VAT-neutral intent, and report attachment metadata. Monetary values use integer minor units plus explicit currency; quantities/rates use `Decimal`. Provider-specific JSON field names exist only inside the concrete adapter.
 
 ### 16.2 Adapter rules
 
@@ -3376,7 +3632,7 @@ The initial adapter uses these provider surfaces behind one internal client boun
 
 | Surface | v1 compatibility profile | Purpose |
 |---|---|---|
-| e-conomic REST API | unversioned public REST schema, captured by schema digest in the certification report | agreement/module inspection, customer and product validation, accounting years and periods, whole-draft writes, and invoice booking |
+| e-conomic REST API | unversioned public REST schema, captured by schema digest in the certification report | agreement/module inspection, customer and product validation, accounting years and periods, whole-draft writes, invoice booking, journal finance-voucher creation/read-back, and voucher attachments |
 | Q2C API | `v5.3.0` | authoritative draft-line and booked-line reads, including accrual flags and dates |
 | Webhooks API | `v1.0.0` | event-type discovery and webhook registration |
 
@@ -3404,9 +3660,16 @@ The preflight must fetch and persist evidence for:
 6. configured customer groups and VAT zones used by provisioning policy;
 7. all mapped products and whether they are accessible;
 8. mapped product groups and their accrual-account configuration where required;
-9. accounting years and relevant periods;
+9. accounting years and relevant periods, including whether the target close period is open;
 10. supported webhook event types;
-11. a no-write API health check.
+11. a no-write API health check;
+12. the configured customer-credit close journal and its writable state;
+13. the liability, clearing, and optional movement-class accounts, including whether direct entries are allowed;
+14. the debit/credit sign mapping and accounting-period posting date used by the certified sandbox fixtures;
+15. target currency availability and the accountant-approved no-cross-currency policy;
+16. finance-voucher create/read capability;
+17. voucher-attachment create/read capability and configured report-size limit;
+18. customer-settlement prerequisites when e-conomic is configured as the authoritative open-receivables system.
 
 A preflight result expires after a configurable duration, default 24 hours, and is invalidated immediately by mapping or credential changes.
 
@@ -3458,7 +3721,7 @@ Default deterministic format:
 Usage: <quantity> <unit> @ <effective rate> <currency> | Ref: <line short id>
 ```
 
-For fixed charges, omit the usage line. For discount and credit lines, prefix with `Discount:` or `Credit:`. Descriptions are normalized to Unicode NFC, strip control characters, and are truncated safely below the provider maximum while retaining the short reference.
+For fixed charges, omit the usage line. Prefix commercial discounts with `Discount:` and correction/credit-note lines with `Credit:`. A customer-credit settlement is not encoded as either kind of invoice line unless an accountant-approved adapter mode explicitly defines that representation. Descriptions are normalized to Unicode NFC, strip control characters, and are truncated safely below the provider maximum while retaining the short reference.
 
 ### 17.7 Provider and application idempotency
 
@@ -3583,6 +3846,53 @@ Provider-generated VAT, gross totals, invoice number, and payment status are rec
 
 Fatal differences stop automation. Warnings require visibility but may not block according to team policy.
 
+### 17.16 Monthly customer-credit close mapping and reconciliation
+
+Billing Core is the detailed customer-credit subledger. e-conomic receives one aggregate general-ledger close per team, currency, and accounting month; it does not receive customer-level credit grants, applications, reservations, refunds, expiries, or balances.
+
+The canonical close uses this exact arithmetic:
+
+```text
+opening_balance             = preceding accepted close's closing_balance
+closing_balance             = sum(available_minor + reserved_minor) at the frozen cutoff
+net_change                  = closing_balance - opening_balance
+liability_change            = net_change  # positive means the company owes customers more
+economic_liability_line     = opening_balance - closing_balance  # canonical debit-positive amount
+```
+
+Reservations and releases move value between available and reserved buckets but do not change total outstanding liability. The close report includes both `liability_change` and `economic_liability_line`; the latter is the exact `last_month_balance - current_balance` figure supplied to the liability-account mapping.
+
+The voucher date follows the accepted close-policy version, normally the final calendar day of the accounting month in the team's accounting time zone. The stable voucher text/reference is:
+
+```text
+REVRYN:CREDIT-CLOSE:<close-id>:<YYYY-MM>:<currency>
+```
+
+Posting semantics are explicit and tested:
+
+- `liability_change > 0` / `economic_liability_line < 0`: credit the configured customer-credit liability account by the increase; debit the configured aggregate balancing account(s);
+- `liability_change < 0` / `economic_liability_line > 0`: debit the liability account by the decrease; credit the configured aggregate balancing account(s);
+- both values equal zero: always freeze and retain a close report; create an ERP voucher only when `post_zero_delta` is enabled and the provider accepts the configured representation.
+
+The liability side contains exactly one aggregate line. The balancing side may contain one aggregate offset line or a small set of aggregate movement-class lines when grants, applications, refunds, expiries, or corrections require different accountant-approved accounts. Neither side contains a customer/customer-number dimension, invoice-line detail, or VAT code. The close voucher is VAT-neutral and does not replace any invoice, credit note, refund document, or VAT treatment required by the underlying commercial event.
+
+Posting flow:
+
+1. Acquire the unique team/currency/period close lock.
+2. Verify opening-to-prior-closing continuity, ledger projection integrity, frozen transaction membership, policy version, and report manifest.
+3. Require finance approval of the exact close hash.
+4. Persist a durable `post_customer_credit_close` operation and stable provider idempotency key.
+5. Search by stored voucher reference before every recovery write.
+6. Create the finance voucher in the configured journal and accounting year.
+7. Read back the voucher and reconcile journal, date, currency, accounts, sign, amounts, and stable reference.
+8. Attach the PDF summary to the voucher.
+9. Read back attachment metadata and record its provider reference.
+10. Mark the close `reconciled` only when both voucher and attachment checks pass.
+
+A response timeout after possible commit enters `outcome_unknown`. Because the provider idempotency response cache is time-limited, recovery must search by known voucher ID and then by bounded journal/accounting-year/date/reference/account/amount criteria before issuing another write. Application-level uniqueness, the close lock, stable reference, frozen report hash, and authoritative read-back remain the durable duplicate controls.
+
+A posted close and its transaction-membership set are immutable. A mismatch is corrected through an approved reversal/replacement close or a current-period prior-period adjustment; the system never silently edits a posted voucher or injects a late transaction into a closed membership set.
+
 ## 18. Billing scheduler and concurrency
 
 ### 18.1 Run creation
@@ -3629,6 +3939,22 @@ Team policy is one of:
 - `manual_review`: quarantine until finance decision.
 
 The default is `carry_forward` for immaterial usage and `manual_review` above a configurable threshold. The threshold is a business policy and must be approved before production.
+
+### 18.6 Customer-credit close scheduling and cutoff
+
+A customer-credit close is scheduled by the team's accounting time zone, not by server-local time. The default cutoff is the first safe execution window after the final instant of the calendar month, with a configurable finance review delay. Exactly one active calculation/posting workflow may exist for a team, currency, and accounting month.
+
+Before freezing a close, the scheduler verifies that:
+
+- all credit ledger transactions with `accounting_effective_on` inside the month and `occurred_at` at or before the cutoff are durably committed;
+- no earlier close for the same currency is unresolved, except an explicitly approved bootstrap opening balance;
+- account projections reconcile to the append-only ledger;
+- no in-flight reservation can be misclassified as a final application or release;
+- the target policy version and e-conomic preflight are valid.
+
+Transactions discovered or created after the frozen cutoff are not inserted into the closed period. They appear in the next close as explicitly classified `prior_period_adjustment` movements with references to the affected economic date and reason. Reopening a month requires an authorized reversal/replacement workflow, not mutation of the accepted close.
+
+The scheduler serializes close calculation and posting separately: local calculation may proceed while e-conomic is unavailable, but only one approved close operation for the key may attempt an external write. A closed accounting period blocks posting and surfaces an actionable finance operation rather than selecting another date automatically.
 
 ## 19. Security architecture
 
@@ -3740,9 +4066,11 @@ The baseline email implementation uses an application mail abstraction backed by
 - Collect only invoice-relevant customer data.
 - Usage metrics should avoid personal data; metric schemas must document permitted properties.
 - Team-configurable retention applies to raw usage after invoice freeze, subject to dispute and audit needs.
-- Frozen invoice intent, calculation traces, correction chains, and sync evidence use an accountant-approved financial retention period.
+- Frozen invoice intent, calculation traces, correction chains, customer-credit transactions, close memberships, close reports, manifests, ERP voucher/attachment snapshots, and reconciliation evidence use an accountant-approved financial retention period.
 - The default financial evidence retention is six years, configurable upward; production policy must not be shorter than the applicable approved legal requirement.
-- Customer deletion requests pseudonymize nonessential operational data when legal and contractual retention permits. e-conomic remains responsible for its accounting records.
+- e-conomic is authoritative for general-ledger balances and posted vouchers. Billing Core is authoritative for the detailed customer-credit subledger and the evidence that explains each aggregate monthly voucher; both sides are required to reconstruct the transaction and control trail.
+- Posted close reports and manifests are immutable, content-addressed where practical, included in backup/restore verification, and exportable with hashes independent of the object-storage implementation.
+- Customer deletion requests pseudonymize nonessential operational data when legal and contractual retention permits. Financial evidence is retained or pseudonymized only under the approved bookkeeping/privacy policy; deletion must not break close continuity or voucher traceability.
 - Data exports and erasure operations are audited.
 
 ## 21. Reliability, performance, and service levels
@@ -3853,7 +4181,8 @@ Every operational log entry has a stable `event` name and, where applicable:
 - outcome, duration, retry count, and error class;
 - sanitized provider status, endpoint operation name, and provider request/error ID;
 - GraphQL operation name, never the full query document by default;
-- domain state transition name and before/after state names, not full financial payloads.
+- domain state transition name and before/after state names, not full financial payloads;
+- `customer_credit_close_id`, accounting month, currency, opening/closing/net-change minor units, movement counts, report hash, and ERP voucher reference for close workflows, without customer-level credit detail.
 
 Logging rules:
 
@@ -3888,6 +4217,12 @@ erp_retry_total{provider,reason}
 erp_rate_limit_total{provider}
 reconciliation_total{provider,result}
 reconciliation_mismatch_fields_total{field}
+customer_credit_closes_total{state,result}
+customer_credit_close_duration_seconds{phase,result}
+customer_credit_close_mismatches_total{reason}
+customer_credit_close_oldest_unreconciled_seconds{state}
+customer_credit_close_reports_total{result}
+customer_credit_close_voucher_attachments_total{result}
 webhook_receipts_total{provider,result}
 oban_jobs_total{queue,state}
 oban_job_duration_seconds{queue,worker}
@@ -3909,7 +4244,7 @@ beam_run_queue
 beam_scheduler_utilization_ratio
 ```
 
-Metrics should be sourced from existing Phoenix/Ecto/Oban/VM telemetry wherever possible instead of duplicate manual timers. Domain metrics are emitted only where framework telemetry lacks the business concept.
+Metrics should be sourced from existing Phoenix/Ecto/Oban/VM telemetry wherever possible instead of duplicate manual timers. Domain metrics are emitted only where framework telemetry lacks the business concept. Customer-credit amounts, currencies, close IDs, team IDs, report hashes, and voucher numbers are never Prometheus labels; they belong in access-controlled logs, traces, reports, and durable records.
 
 ### 22.4 Distributed tracing
 
@@ -3925,6 +4260,7 @@ Spans cover:
 - rating calculation and invoice freeze as coarse domain spans;
 - outbound Req calls to ERP/SMTP-adjacent HTTP providers where applicable;
 - ERP write, read-back, and reconciliation;
+- customer-credit close calculation, approval, voucher creation, attachment upload, read-back, reconciliation, and reversal/replacement;
 - backup/restore verification phases.
 
 Never put invoice line descriptions, customer PII, auth tokens, full SQL parameter values, GraphQL variables, or email bodies in span attributes. IDs, operation names, hashes, counts, states, and bounded error categories are sufficient.
@@ -3942,6 +4278,7 @@ The product-specific operations area complements LiveDashboard with durable busi
 - SMTP configuration/health without exposing credentials;
 - last backup and last **verified restore**;
 - billing-run lag and unresolved operation counts;
+- latest customer-credit close per currency, opening/closing/net change, report hash, voucher/attachment reconciliation, and unresolved close mismatches;
 - links by operation/correlation ID to audit evidence, relevant domain object, and external trace backend when configured.
 
 LiveDashboard is diagnostic, not an admin backdoor. It must not expose arbitrary code evaluation or replace domain-specific operational controls.
@@ -4049,7 +4386,7 @@ OpenTelemetry spans link inbound command → durable operation → Oban attempt 
 
 ### 22.10 CLI and MCP observability
 
-CLI and MCP requests participate in the same correlation model. `billingctl` sends a generated correlation ID unless one is explicitly supplied, prints it on failures, and includes it in JSON output. MCP tool executions propagate trace context where available and always return a safe operation/correlation reference for asynchronous mutations. Metrics include bounded tool/command names and result classes; user input and arguments are never metric labels.
+CLI and MCP requests participate in the same correlation model. `revryn` sends a generated correlation ID unless one is explicitly supplied, prints it on failures, and includes it in JSON output. MCP tool executions propagate trace context where available and always return a safe operation/correlation reference for asynchronous mutations. Metrics include bounded tool/command names and result classes; user input and arguments are never metric labels.
 
 ## 23. Testing strategy
 
@@ -4103,6 +4440,12 @@ A feature is not complete because unit tests pass. A P0 feature is complete only
 | Partial credit | cumulative credit bounded |
 | Foreign currency | currency preserved and minor-unit rules applied |
 | Negative amount rounding | symmetric documented rounding |
+| Customer-credit close increase | opening 0, closing 100; +100 liability change and -100 debit-positive e-conomic liability line |
+| Customer-credit close decrease | opening 100, closing 80; -20 liability change and +20 debit-positive e-conomic liability line |
+| Customer-credit close zero delta | report exists; ERP posting follows zero-delta policy |
+| Customer-credit close mixed movements | grants/applications/refunds/expiries bridge exactly to closing balance |
+| Customer-credit close multiple currencies | one independent close per currency; no netting |
+| Customer-credit close late event | next-period prior-period adjustment; closed membership unchanged |
 
 ### 23.3 Property-based invariants
 
@@ -4114,6 +4457,11 @@ A feature is not complete because unit tests pass. A P0 feature is complete only
 - Canonical JSON hash is independent of map insertion order.
 - Re-running the same frozen snapshot produces identical invoice lines and hashes.
 - Adapter normalization followed by provider read normalization preserves intended net line amounts.
+- Every accepted customer-credit close satisfies `opening_minor + signed_liability_movement_sum = closing_minor`, `net_change_minor = closing_minor - opening_minor`, and `economic_liability_line_minor = opening_minor - closing_minor`.
+- A non-bootstrap close's opening balance equals the preceding accepted close's closing balance for the same team and currency.
+- One customer-credit transaction belongs to at most one accepted close; replay and concurrency cannot duplicate membership.
+- Canonical close JSON, report inputs, ledger snapshot hash, and manifest hashes are deterministic for the same frozen membership and policy version.
+- Summing `available_minor + reserved_minor` across all customer-credit accounts for a team/currency at the cutoff equals the close's closing balance; reservation/release pairs do not change liability.
 
 ### 23.4 e-conomic sandbox certification suite
 
@@ -4133,7 +4481,12 @@ Before production, execute and retain evidence for:
 12. lose the create response and prove idempotent recovery;
 13. exercise `429`, validation error, unauthorized, and conflict handling through fakes when sandbox cannot induce them;
 14. verify behavior when an accounting period is closed;
-15. verify a human-modified draft is detected before overwrite or booking.
+15. verify a human-modified draft is detected before overwrite or booking;
+16. create and read back an aggregate finance voucher for a positive customer-credit liability delta;
+17. create and read back a negative liability delta using the approved debit/credit sign mapping;
+18. attach the generated PDF close report and read back attachment metadata/file identity;
+19. lose the voucher-create or attachment response after commit and prove reconciliation-first recovery without duplication;
+20. verify closed-period, invalid-journal, invalid-account, report-too-large, and voucher/report mismatch handling.
 
 Certification artifacts become part of the release evidence.
 
@@ -4148,7 +4501,10 @@ Maintain a stateful fake ERP server that supports:
 - rate limits and retry metadata;
 - human mutation of a draft;
 - webhook delivery, duplication, and loss;
-- booked line accrual fields.
+- booked line accrual fields;
+- journal finance-voucher creation/read-back with signed account lines;
+- voucher attachment upload/read-back, including failure after voucher commit;
+- closed accounting periods and externally mutated vouchers.
 
 The fake is not a substitute for sandbox tests; it makes failure paths deterministic in CI.
 
@@ -4159,7 +4515,7 @@ Playwright is a required dependency of the repository even though the product UI
 - Browser tests run against a compiled production Phoenix release with built assets.
 - The default environment uses real PostgreSQL and the stateful fake ERP; tests do not stub LiveView HTTP/WebSocket traffic.
 - Authentication may use a test OIDC provider or deterministic test identity boundary, but authorization remains real.
-- P0 scenarios include team setup, product/plan publication, customer/subscription creation, annual prepaid invoice preview, draft synchronization, reconciliation, approval/booking simulation, correction, audit inspection, and restore smoke validation.
+- P0 scenarios include team setup, product/plan publication, customer/subscription creation, annual prepaid invoice preview, draft synchronization, reconciliation, approval/booking simulation, correction, monthly customer-credit close generation/approval/posting/attachment/reconciliation, audit inspection, and restore smoke validation.
 - Failed runs retain Playwright traces, screenshots, relevant HTML, browser console, Phoenix logs, worker logs, and fake-provider logs.
 - Required suites use `retries: 0`; a diagnostic retry job may run separately and cannot affect merge status.
 - Selectors prioritize accessible roles, labels, names, and stable user-facing semantics.
@@ -4167,7 +4523,7 @@ Playwright is a required dependency of the repository even though the product UI
 
 ### 23.7 Integration tests as workflow documentation
 
-Integration tests are organized by business workflow under `test/workflows/`, not merely by implementation module. A reader should be able to answer "what happens when an annual subscription is upgraded mid-period?" by reading one test file and its linked feature document.
+Integration tests are organized by business workflow under `test/workflows/`, not merely by implementation module. A reader should be able to answer "what happens when an annual subscription is upgraded mid-period?" or "how does the monthly customer-credit balance become one e-conomic voucher?" by reading one test file and its linked feature document.
 
 Each workflow test should use Given/When/Then comments sparingly, descriptive setup helpers using domain vocabulary, and assertions on durable business outcomes rather than internal call counts. External network clients are replaced by stateful contract fakes; PostgreSQL, Ecto, jobs, domain contexts, authorization, and serialization remain real.
 
@@ -4237,6 +4593,31 @@ The standalone certification gate runs **before** any Billing Core integration c
 - Never copy production ERP tokens or invoice data into development.
 - Sandbox fixtures have stable IDs and automatic cleanup where safe.
 - Golden snapshots contain no real personal data.
+
+### 23.13 Customer-credit close certification matrix
+
+The following cases are mandatory workflow integration tests and, where an external write is involved, Playwright/fake-ERP tests. Sandbox-compatible cases are also part of e-conomic certification.
+
+| Case | Required evidence |
+|---|---|
+| First close from zero | imported/approved opening `0`, complete membership, exact closing and positive delta |
+| Increase in liability | `0 -> 100` produces one liability increase and balanced aggregate voucher |
+| Decrease in liability | `100 -> 80` produces one liability decrease and balanced aggregate voucher |
+| Zero delta with movements | grants and applications offset; movement bridge is non-empty although net delta is zero |
+| Grants, applications, releases | each class is counted once and signs bridge to closing balance |
+| Refund and expiry | liability decreases; balancing account follows policy; underlying refund/document workflow remains separate |
+| Positive/negative adjustment | reason, actor, effective date, and source reference are retained |
+| Multiple currencies | DKK/EUR close independently; no conversion or cross-currency netting |
+| Concurrent generation | exactly one accepted close and membership set for the key |
+| Late/backdated transaction | next close carries an explicit prior-period adjustment; old close/report hash unchanged |
+| Closed e-conomic period | operation becomes actionable/blocked; no alternate date selected silently |
+| Timeout after voucher commit | authoritative read finds exactly one voucher before retry |
+| Attachment failure after voucher | voucher remains known; attachment operation retries/reconciles independently |
+| External voucher mutation | mismatch blocks close finalization and provides reversal/remediation path |
+| Reversal/replacement | original close/voucher/report stay immutable and chain to replacement |
+| Backup and restore | close memberships, hashes, report bundle, voucher refs, and reconciliation survive restore |
+
+The end-to-end happy path is: generate → review movement bridge → approve exact hash → post voucher → read back → attach PDF → verify attachment → reconcile → close → use closing balance as the next month's opening balance.
 
 ## 24. CI/CD and deployment
 
@@ -4529,10 +4910,26 @@ The preferred policy is to make Billing Core-managed e-conomic drafts operationa
 - Approve/book according to policy.
 - Reconcile all booked invoices and accrual dates.
 - Review credit and replacement chains.
-- Review late usage and unknown outcomes.
-- Export run summary and unresolved exceptions.
-- Close billing runs only after finance sign-off.
-- Confirm e-conomic remains the final source for accounting reports.
+- Freeze each team/currency customer-credit close after the configured cutoff.
+- Verify prior-closing-to-current-opening continuity and the movement bridge.
+- Review and approve the exact close/report hash.
+- Post the aggregate liability voucher, attach the PDF report, and reconcile both voucher and attachment.
+- Confirm the next month's opening balance equals the accepted closing balance.
+- Review late usage, prior-period credit adjustments, blocked operations, and unknown outcomes.
+- Export run/close summaries and unresolved exceptions.
+- Close billing runs and customer-credit closes only after finance sign-off.
+- Confirm e-conomic is authoritative for general-ledger reports and Billing Core retains the detailed credit-subledger evidence.
+
+### 25.9 Customer-credit close mismatch or unknown voucher
+
+1. Stop automatic posting for the affected team/currency; do not regenerate or mutate the frozen close.
+2. Preserve the close, transaction memberships, canonical report bundle, manifest hash, operation attempts, and all known e-conomic references.
+3. Search the configured journal/accounting year using the stable close reference, known voucher number, posting date, liability account, currency, and exact net amount.
+4. If one matching voucher exists, read it back, compare every aggregate line, and continue attachment/reconciliation from the last confirmed step.
+5. If multiple plausible vouchers exist, mark `mismatch`, block automation, and require finance resolution; never choose by amount alone.
+6. If no voucher exists and absence is established, retry the same logical operation under its stable idempotency key and lock.
+7. If the voucher differs, do not edit it or the close in place. Produce a reversal/replacement proposal or current-period prior-period adjustment under approved policy.
+8. After remediation, verify the voucher, attachment, closing balance, report hash, and next-period opening continuity; add a regression/failure-injection test for the root cause.
 
 ## 26. Open-source project policy
 
@@ -4723,9 +5120,9 @@ The repository must contain these ADRs before feature implementation begins.
 
 **Consequence:** worker retry/pruning can change without losing user-visible state; the web UI, GraphQL, CLI, and MCP all expose the same operation lifecycle.
 
-### ADR-026 — Go is the implementation language for `billingctl` and MCP
+### ADR-026 — Go is the implementation language for `revryn` and MCP
 
-**Decision:** implement the public CLI in Go with Cobra and implement MCP in the same Go module using the official Tier-1 MCP Go SDK. Package `billingctl` in the official OCI image and publish native binaries separately.
+**Decision:** implement the public CLI in Go with Cobra and implement MCP in the same Go module using the official Tier-1 MCP Go SDK. Package `revryn` in the official OCI image and publish native binaries separately.
 
 **Consequence:** Phoenix remains the application/domain runtime; Go is a deliberately small companion client/runtime for distribution-heavy interfaces. CLI/MCP do not connect directly to PostgreSQL or bypass Phoenix authorization.
 
@@ -4752,6 +5149,12 @@ The repository must contain these ADRs before feature implementation begins.
 **Decision:** state-changing domain transactions may emit versioned domain events through the PostgreSQL transactional outbox. Current Ecto row state plus immutable audit evidence remains authoritative. Do not adopt Commanded/EventStore/CQRS event sourcing for v1.
 
 **Consequence:** downstream workflows and future integrations can be event-driven while accounting-critical invariants remain synchronous and strongly consistent. Event sourcing requires a future ADR backed by concrete replay/projection requirements.
+
+### ADR-031 — Billing Core is the detailed customer-credit subledger; e-conomic receives a monthly aggregate close
+
+**Decision:** persist every customer-credit grant, reservation, release, application, refund, expiry, and adjustment in Billing Core. At month end, freeze one close per team and currency and post only the signed change in total outstanding credit liability to e-conomic as an aggregate finance voucher with an attached report. The economic liability change is `closing_balance - opening_balance`; the canonical debit-positive liability-account amount sent by the adapter is `opening_balance - closing_balance`, matching the operational `last_month_balance - current_balance` convention. No customer-level credit rows are sent as part of the liability-close voucher.
+
+**Consequence:** e-conomic remains authoritative for the general ledger and posted voucher. Billing Core becomes authoritative financial evidence for the detailed customer-credit subledger, close membership, movement bridge, report bundle, and reconciliation. The balancing side may retain aggregate movement classes when accounting mappings differ, but it never expands into customer rows. Posted closes are corrected only by reversal/replacement or approved later-period adjustment.
 
 ## 28. Build plan for tiered LLM-agent teams
 
@@ -4887,6 +5290,7 @@ program:
     - async-failure-remediation-check
     - state-machine-contract-check
     - domain-event-contract-check
+    - credit-close-contract-check
     - cli-contract-check
     - mcp-contract-check
     - secret-scan
@@ -4959,11 +5363,14 @@ milestones:
       - line-level accrual dates reconcile
       - unknown-outcome recovery is demonstrated
   - id: M4
-    name: booking-and-correction-ready
+    name: booking-correction-and-credit-close-ready
     exit_criteria:
       - approval and booking flow works
       - booked invoice reconciliation works
       - full and partial credits work in sandbox
+      - monthly customer-credit close report is deterministic and continuity-checked
+      - aggregate e-conomic finance voucher and PDF attachment reconcile without customer-level rows
+      - unknown-outcome and reversal/replacement close workflows are demonstrated
   - id: M5
     name: production-ready
     exit_criteria:
@@ -5643,31 +6050,35 @@ tasks:
     workstream: W7
     tier: 3
     title: accounting-boundary-and-reconciliation-review
-    stories: [BC-US-011, BC-US-012, BC-US-080, BC-US-089, BC-US-090, BC-US-102, BC-US-103, BC-US-104, BC-US-114]
-    invariants: [INV-001, INV-002, INV-003, INV-004, INV-005, INV-011]
-    depends_on: [BC-TASK-042, BC-TASK-056, BC-TASK-072]
+    stories: [BC-US-011, BC-US-012, BC-US-080, BC-US-089, BC-US-090, BC-US-102, BC-US-103, BC-US-104, BC-US-114, BC-US-163, BC-US-164, BC-US-165]
+    invariants: [INV-001, INV-002, INV-003, INV-004, INV-005, INV-008, INV-009, INV-011, INV-050, INV-051, INV-052, INV-053, INV-054, INV-055, INV-056, INV-057]
+    depends_on: [BC-TASK-042, BC-TASK-056, BC-TASK-072, BC-TASK-103]
     owned_paths: [docs/reviews/accounting-v1.md]
     outputs:
       - invariant review
       - correction-chain review
       - accrual-period evidence review
+      - customer-credit subledger-to-general-ledger close review
     acceptance:
-      - no path mutates booked documents
+      - no path mutates booked documents or posted credit closes
       - every over-time line has tested ERP accrual dates
+      - every monthly credit voucher reconciles to an immutable close and contains no customer-level rows
+      - close continuity movement bridge account mapping and reversal policy have accountant-approved evidence
 
   - id: BC-TASK-075
     workstream: W7
     tier: 2
     title: economic-sandbox-certification
-    stories: [BC-US-003, BC-US-004, BC-US-005, BC-US-006, BC-US-012, BC-US-031, BC-US-032, BC-US-080, BC-US-081, BC-US-082, BC-US-083, BC-US-084, BC-US-085, BC-US-086, BC-US-087, BC-US-088, BC-US-089, BC-US-090, BC-US-102, BC-US-103, BC-US-104, BC-US-105, BC-US-106, BC-US-113]
-    invariants: [INV-001, INV-002, INV-003, INV-004, INV-005, INV-006, INV-007, INV-008, INV-009, INV-010, INV-011, INV-012, INV-015]
-    depends_on: [BC-TASK-052, BC-TASK-053, BC-TASK-055, BC-TASK-056]
+    stories: [BC-US-003, BC-US-004, BC-US-005, BC-US-006, BC-US-012, BC-US-031, BC-US-032, BC-US-080, BC-US-081, BC-US-082, BC-US-083, BC-US-084, BC-US-085, BC-US-086, BC-US-087, BC-US-088, BC-US-089, BC-US-090, BC-US-102, BC-US-103, BC-US-104, BC-US-105, BC-US-106, BC-US-113, BC-US-163, BC-US-164, BC-US-165]
+    invariants: [INV-001, INV-002, INV-003, INV-004, INV-005, INV-006, INV-007, INV-008, INV-009, INV-010, INV-011, INV-012, INV-015, INV-054, INV-055, INV-056, INV-057]
+    depends_on: [BC-TASK-052, BC-TASK-053, BC-TASK-055, BC-TASK-056, BC-TASK-103]
     owned_paths: [test/sandbox, docs/release/economic-certification.md]
     outputs:
       - automated sandbox suite
       - retained certification report
     acceptance:
       - all mandatory sandbox cases pass or have accountant-approved documented limitation
+      - finance-voucher create/read attachment and reconciliation cases pass for positive negative and unknown-outcome close paths
 
   - id: BC-TASK-077
     workstream: W7
@@ -5696,7 +6107,7 @@ tasks:
     stories: [BC-US-121, BC-US-122]
     invariants: [INV-003, INV-008, INV-014, INV-015, INV-017, INV-023]
     depends_on: [BC-TASK-001, BC-TASK-003, BC-TASK-060]
-    owned_paths: [lib/billing_core_web/schema.ex, lib/billing_core_web/graphql, schema/billing_core.graphql, test/graphql, docs/graphql]
+    owned_paths: [lib/billing_core_web/schema.ex, lib/billing_core_web/graphql/runtime, lib/billing_core_web/graphql/middleware, lib/billing_core_web/graphql/pagination, lib/billing_core_web/graphql/batching, schema/billing_core.graphql, test/graphql, docs/graphql]
     outputs:
       - Absinthe schema and resolver middleware
       - cursor pagination and batching primitives
@@ -5716,7 +6127,7 @@ tasks:
     stories: [BC-US-128, BC-US-129, BC-US-131]
     invariants: [INV-021, INV-023]
     depends_on: [BC-TASK-001]
-    owned_paths: [docs/features, docs/templates/feature.md, CONTRIBUTING.md, scripts/docs-check, marketing]
+    owned_paths: [docs/features/README.md, docs/features/_schema.yml, docs/templates/feature.md, CONTRIBUTING.md, scripts/docs-check, marketing]
     outputs:
       - feature document schema/template and validator
       - docs-first contribution workflow and PR checks
@@ -5752,7 +6163,7 @@ tasks:
     stories: [BC-US-120, BC-US-123, BC-US-124, BC-US-127, BC-US-130]
     invariants: [INV-016, INV-018, INV-019, INV-022]
     depends_on: [BC-TASK-001, BC-TASK-002, BC-TASK-051, BC-TASK-067, BC-TASK-080]
-    owned_paths: [e2e, playwright.config.ts, scripts/e2e]
+    owned_paths: [e2e/platform, e2e/support, playwright.config.ts, scripts/e2e]
     outputs:
       - Playwright runner against built Phoenix release
       - P0 workflow suite and failure artifacts
@@ -5802,9 +6213,9 @@ tasks:
     workstream: W8
     tier: 3
     title: docs-tests-schema-consistency-review
-    stories: [BC-US-121, BC-US-122, BC-US-123, BC-US-124, BC-US-128, BC-US-129, BC-US-130, BC-US-131]
-    invariants: [INV-017, INV-018, INV-021, INV-022, INV-023]
-    depends_on: [BC-TASK-078, BC-TASK-079, BC-TASK-080, BC-TASK-081, BC-TASK-082]
+    stories: [BC-US-121, BC-US-122, BC-US-123, BC-US-124, BC-US-128, BC-US-129, BC-US-130, BC-US-131, BC-US-163, BC-US-164, BC-US-165]
+    invariants: [INV-017, INV-018, INV-021, INV-022, INV-023, INV-045, INV-054, INV-055, INV-056, INV-057]
+    depends_on: [BC-TASK-078, BC-TASK-079, BC-TASK-080, BC-TASK-081, BC-TASK-082, BC-TASK-104]
     owned_paths: [docs/reviews/product-contract-consistency-v1.md]
     outputs:
       - feature-doc to GraphQL to integration to E2E traceability report
@@ -6053,11 +6464,11 @@ tasks:
   - id: BC-TASK-098
     workstream: W10
     tier: 2
-    title: go-billingctl-foundation-and-contract
+    title: go-revryn-foundation-and-contract
     stories: [BC-US-157, BC-US-159]
     invariants: [INV-014, INV-017, INV-023, INV-036, INV-043, INV-045]
     depends_on: [BC-TASK-061, BC-TASK-096]
-    owned_paths: [cmd/billingctl, internal/client, internal/commands, contracts/cli, docs/cli]
+    owned_paths: [clients/revryn/cmd/revryn, clients/revryn/internal/client, clients/revryn/internal/commands, clients/revryn/contracts/cli, docs/cli]
     outputs:
       - Go module with Cobra command tree
       - auth profile and scope handling
@@ -6076,7 +6487,7 @@ tasks:
     stories: [BC-US-158, BC-US-159]
     invariants: [INV-014, INV-023, INV-036, INV-044, INV-045]
     depends_on: [BC-TASK-098]
-    owned_paths: [internal/mcp, contracts/mcp, docs/mcp, test/mcp]
+    owned_paths: [clients/revryn/internal/mcp, clients/revryn/contracts/mcp, docs/mcp, test/mcp]
     outputs:
       - official Go MCP SDK integration
       - stdio and stateless Streamable HTTP transports
@@ -6093,16 +6504,16 @@ tasks:
     workstream: W10
     tier: 3
     title: cli-mcp-release-and-agent-safety-certification
-    stories: [BC-US-157, BC-US-158, BC-US-159]
-    invariants: [INV-018, INV-021, INV-032, INV-036, INV-043, INV-044, INV-045]
-    depends_on: [BC-TASK-097, BC-TASK-098, BC-TASK-099, BC-TASK-081]
+    stories: [BC-US-157, BC-US-158, BC-US-159, BC-US-163, BC-US-164, BC-US-165]
+    invariants: [INV-018, INV-021, INV-032, INV-036, INV-043, INV-044, INV-045, INV-054, INV-055, INV-056, INV-057]
+    depends_on: [BC-TASK-097, BC-TASK-098, BC-TASK-099, BC-TASK-081, BC-TASK-104]
     owned_paths: [docs/reviews/cli-mcp-v1.md, e2e/cli, e2e/mcp]
     outputs:
       - CLI end-to-end certification
       - MCP protocol/authorization/tool-safety certification
       - docs and compatibility evidence
     acceptance:
-      - representative billing workflow succeeds from CLI and MCP independently
+      - representative billing workflow and customer-credit close inspection/remediation succeed from CLI and MCP independently
       - dangerous/accounting-sensitive mutations require intended confirmation gates
       - interface failures produce actionable correlation references
       - docs CLI help MCP metadata and actual implementation are consistent
@@ -6114,7 +6525,7 @@ tasks:
     stories: [BC-US-160, BC-US-161, BC-US-162, BC-US-107, BC-US-108, BC-US-109]
     invariants: [INV-013, INV-015, INV-040, INV-046, INV-047, INV-048, INV-049, INV-050, INV-051, INV-052, INV-053]
     depends_on: [BC-TASK-001, BC-TASK-002]
-    owned_paths: [lib/billing_core/state_machine, test/state_machine, docs/architecture/state-machines.md, docs/architecture/domain-events.md, docs/adrs/ADR-029-state-machines.md, docs/adrs/ADR-030-domain-events.md]
+    owned_paths: [lib/billing_core/state_machine, test/state_machine, docs/architecture/state-machines.md, docs/architecture/domain-events.md, docs/adr/ADR-029-state-machines.md, docs/adr/ADR-030-domain-events.md]
     outputs:
       - Finitomata versus minimal-internal-abstraction spike
       - executable subscription and durable-operation lifecycle prototypes
@@ -6137,7 +6548,7 @@ tasks:
     stories: [BC-US-107, BC-US-108, BC-US-109]
     invariants: [INV-001, INV-002, INV-003, INV-008, INV-013, INV-015, INV-050, INV-051, INV-052, INV-053]
     depends_on: [BC-TASK-101]
-    owned_paths: [lib/billing_core/credits, test/billing_core/credits, priv/repo/migrations, docs/features/customer-credits.md, docs/architecture/customer-credit-ledger.md]
+    owned_paths: [lib/billing_core/credits, test/billing_core/credits, priv/repo/migrations/customer_credits, docs/features/customer-credits.md, docs/architecture/customer-credit-ledger.md]
     outputs:
       - currency-scoped customer credit subledger
       - deterministic reservation and allocation engine
@@ -6148,18 +6559,86 @@ tasks:
     acceptance:
       - 10-seat annual prepayment downgraded to 8 seats after 2 months produces the exact deterministic unused-service credit for the remaining 10 months
       - concurrent invoice runs cannot double-spend or drive credit negative
-      - credit note creation and spendable customer credit are distinct and reconcile exactly once
+      - credit note creation spendable customer credit and receivable settlement are distinct and reconcile exactly once without converting credit application into a discount
       - retain refund and expire-after policies are end-to-end tested including failure/retry/reconciliation paths
       - ledger replay reproduces projected available and reserved balances exactly
       - Playwright covers grant visibility future-invoice application and termination disposition workflows
+
+  - id: BC-TASK-103
+    workstream: W5
+    tier: 1
+    title: monthly-customer-credit-close-and-economic-voucher
+    stories: [BC-US-163, BC-US-164, BC-US-165]
+    invariants: [INV-001, INV-002, INV-003, INV-008, INV-009, INV-011, INV-013, INV-015, INV-040, INV-041, INV-046, INV-047, INV-048, INV-050, INV-051, INV-052, INV-053, INV-054, INV-055, INV-056, INV-057]
+    depends_on: [BC-TASK-012, BC-TASK-050, BC-TASK-052, BC-TASK-079, BC-TASK-096, BC-TASK-102]
+    owned_paths: [lib/billing_core/credits/close, lib/billing_core/erp/vouchers, lib/billing_core/erp/adapters/economic/credit_close, priv/repo/migrations/credit_closes, test/integration/credit_closes, docs/features/monthly-credit-close.md, docs/accounting/customer-credit-close.md]
+    outputs:
+      - immutable team-currency-month close aggregate and state machine
+      - exact opening movement closing and net-change calculation
+      - frozen transaction membership ledger snapshot hash and deterministic report bundle
+      - e-conomic aggregate finance-voucher and PDF attachment adapter
+      - voucher attachment unknown-outcome reconciliation and reversal/replacement workflow
+      - telemetry metrics traces runbooks and fake/sandbox contract coverage
+    acceptance:
+      - opening balance equals the preceding accepted close or an explicitly approved first-period opening
+      - closing balance equals available plus reserved credit in the detailed subledger; liability change equals closing minus opening and the e-conomic liability line equals opening minus closing exactly
+      - the liability side has one aggregate line and no e-conomic voucher line contains customer-level credit detail
+      - canonical JSON CSV PDF and SHA-256 manifest bind the close membership and voucher reference deterministically
+      - positive negative zero-delta multiple-currency late-event concurrent and closed-period cases pass
+      - timeout after voucher or attachment commit reconciles before retry and cannot create a duplicate effect
+      - posted close membership and evidence are immutable and correction uses reversal replacement or later-period adjustment
+
+  - id: BC-TASK-104
+    workstream: W6
+    tier: 2
+    title: customer-credit-close-product-surfaces-and-certification
+    stories: [BC-US-163, BC-US-164, BC-US-165]
+    invariants: [INV-014, INV-017, INV-018, INV-021, INV-022, INV-023, INV-032, INV-036, INV-040, INV-042, INV-043, INV-044, INV-045, INV-054, INV-055, INV-056, INV-057]
+    depends_on: [BC-TASK-061, BC-TASK-067, BC-TASK-078, BC-TASK-079, BC-TASK-081, BC-TASK-098, BC-TASK-099, BC-TASK-103]
+    owned_paths: [lib/billing_core_web/live/credit_closes, lib/billing_core_web/graphql/credit_closes, clients/revryn/internal/commands/credit_closes, clients/revryn/internal/mcp/credit_closes, e2e/credit_closes, docs/cli/credits-close.md, docs/mcp/customer-credit-close.md]
+    outputs:
+      - LiveView close review approval posting reconciliation and remediation workflow
+      - GraphQL close queries mutations typed errors and report access
+      - revryn credit-close commands and stable JSON contracts
+      - MCP close resources and semantic tools with confirmation/idempotency metadata
+      - Playwright integrated happy-path and failure-recovery suites
+    acceptance:
+      - authorized finance user can generate review approve post attach reconcile and download the exact close report
+      - users can distinguish automatic retry action-required mismatch and outcome-unknown states without SQL IEx or direct Oban access
+      - LiveView GraphQL CLI and MCP invoke the same domain commands and expose consistent close status/correlation references
+      - cross-team and cross-organization close access is rejected in browser GraphQL CLI and MCP tests
+      - Playwright proves month-to-month opening continuity and one aggregate voucher with no customer lines
+      - docs help output schema and MCP tool metadata remain consistent with implementation
+
+  - id: BC-TASK-105
+    workstream: W6
+    tier: 2
+    title: demo-erp-first-run-activation-and-certification
+    stories: [BC-US-166]
+    invariants: [INV-003, INV-008, INV-009, INV-013, INV-014, INV-015, INV-017, INV-018, INV-021, INV-023, INV-040, INV-041, INV-042, INV-045, INV-046, INV-047]
+    depends_on: [BC-TASK-067, BC-TASK-079, BC-TASK-103, BC-TASK-104]
+    owned_paths: [lib/billing_core/demo, lib/billing_core/erp/fake_erp, lib/billing_core_web/live/first_run, lib/billing_core_web/live/demo, priv/repo/migrations/demo_workspaces, test/workflows/demo_workspace, test/billing_core_web/live/first_run, test/billing_core_web/live/demo, e2e/demo_aha.spec.ts, docs/features/demo-workspace.md]
+    outputs:
+      - durable isolated demo workspace and versioned scenario orchestration
+      - per-connection restart-safe fake ERP instances using the production adapter contract
+      - purposeful first-run empty state guided cause-and-effect journey and inspectable accounting proof
+      - deterministic resume reset and recoverable-failure paths
+      - activation telemetry Playwright evidence and qualitative usability review record
+    acceptance:
+      - a clean install reaches a reconciled synthetic invoice and customer-credit close without real ERP credentials or privileged fixture writes
+      - demo and real ERP setup are visibly distinct and no demo state can leak across teams connections or generations
+      - restart resume and reset preserve immutable financial history and leave no stale operation or provider state
+      - every guided step links to the real domain artifact calculation evidence operation and authoritative fake-ERP read-back
+      - the deterministic happy path and one provider timeout recovery pass in Playwright
+      - representative prospective users can explain the commercial-to-accounting flow and qualitative review accepts the experience as specific polished and trustworthy
 
   - id: BC-TASK-076
     workstream: W7
     tier: 3
     title: production-readiness-review
-    stories: [BC-US-001, BC-US-069, BC-US-087, BC-US-113, BC-US-115, BC-US-116, BC-US-120, BC-US-121, BC-US-122, BC-US-123, BC-US-124, BC-US-125, BC-US-126, BC-US-127, BC-US-128, BC-US-129, BC-US-130, BC-US-140, BC-US-141, BC-US-142, BC-US-143, BC-US-144, BC-US-145, BC-US-146, BC-US-147, BC-US-148, BC-US-149, BC-US-150, BC-US-151, BC-US-152, BC-US-153, BC-US-154, BC-US-155, BC-US-156, BC-US-157, BC-US-158, BC-US-159, BC-US-160, BC-US-161, BC-US-162]
-    invariants: [INV-001, INV-002, INV-003, INV-004, INV-005, INV-006, INV-007, INV-008, INV-009, INV-010, INV-011, INV-012, INV-013, INV-014, INV-015, INV-016, INV-017, INV-018, INV-019, INV-020, INV-021, INV-022, INV-023, INV-024, INV-025, INV-026, INV-027, INV-028, INV-029, INV-030, INV-031, INV-032, INV-033, INV-034, INV-035, INV-036, INV-037, INV-038, INV-039, INV-040, INV-041, INV-042, INV-043, INV-044, INV-045, INV-046, INV-047, INV-048, INV-049]
-    depends_on: [BC-TASK-068, BC-TASK-069, BC-TASK-071, BC-TASK-073, BC-TASK-074, BC-TASK-075, BC-TASK-077, BC-TASK-078, BC-TASK-084, BC-TASK-083, BC-TASK-088, BC-TASK-094, BC-TASK-095, BC-TASK-096, BC-TASK-097, BC-TASK-100, BC-TASK-101, BC-TASK-102]
+    stories: [BC-US-001, BC-US-069, BC-US-087, BC-US-113, BC-US-115, BC-US-116, BC-US-120, BC-US-121, BC-US-122, BC-US-123, BC-US-124, BC-US-125, BC-US-126, BC-US-127, BC-US-128, BC-US-129, BC-US-130, BC-US-140, BC-US-141, BC-US-142, BC-US-143, BC-US-144, BC-US-145, BC-US-146, BC-US-147, BC-US-148, BC-US-149, BC-US-150, BC-US-151, BC-US-152, BC-US-153, BC-US-154, BC-US-155, BC-US-156, BC-US-157, BC-US-158, BC-US-159, BC-US-160, BC-US-161, BC-US-162, BC-US-163, BC-US-164, BC-US-165, BC-US-166]
+    invariants: [INV-001, INV-002, INV-003, INV-004, INV-005, INV-006, INV-007, INV-008, INV-009, INV-010, INV-011, INV-012, INV-013, INV-014, INV-015, INV-016, INV-017, INV-018, INV-019, INV-020, INV-021, INV-022, INV-023, INV-024, INV-025, INV-026, INV-027, INV-028, INV-029, INV-030, INV-031, INV-032, INV-033, INV-034, INV-035, INV-036, INV-037, INV-038, INV-039, INV-040, INV-041, INV-042, INV-043, INV-044, INV-045, INV-046, INV-047, INV-048, INV-049, INV-050, INV-051, INV-052, INV-053, INV-054, INV-055, INV-056, INV-057]
+    depends_on: [BC-TASK-068, BC-TASK-069, BC-TASK-071, BC-TASK-073, BC-TASK-074, BC-TASK-075, BC-TASK-077, BC-TASK-078, BC-TASK-084, BC-TASK-083, BC-TASK-088, BC-TASK-094, BC-TASK-095, BC-TASK-096, BC-TASK-097, BC-TASK-100, BC-TASK-101, BC-TASK-102, BC-TASK-103, BC-TASK-104, BC-TASK-105]
     owned_paths: [docs/reviews/production-readiness-v1.md]
     outputs:
       - final evidence matrix
@@ -6178,6 +6657,7 @@ flowchart LR
   T001[001 Foundation] --> T002[002 DB harness]
   T002 --> T101[101 State machines + domain events]
   T101 --> T003[003 Team audit idempotency]
+  T101 --> T102[102 Customer credit ledger]
   T001 --> T010[010 Money]
   T001 --> T011[011 Periods]
   T001 --> T012[012 Canonical JSON]
@@ -6282,12 +6762,30 @@ flowchart LR
   T054 --> T096[096 Durable async operations]
   T070 --> T096
   T096 --> T097[097 Failure inbox]
-  T078 --> T098[098 billingctl]
+  T078 --> T098[098 revryn]
   T096 --> T098
   T098 --> T099[099 MCP server]
+  T012 --> T103[103 Monthly credit close]
+  T079 --> T103
+  T050 --> T103
+  T052 --> T103
+  T096 --> T103
+  T102 --> T103
+  T061 --> T104[104 Credit close surfaces]
+  T078 --> T104
+  T079 --> T104
+  T067 --> T104
+  T081 --> T104
+  T098 --> T104
+  T099 --> T104
+  T103 --> T104
   T097 --> T100[100 CLI MCP certification]
   T098 --> T100
   T099 --> T100
+  T104 --> T100
+  T103 --> T074
+  T103 --> T075
+  T104 --> T084
   T068 --> T076[076 Production review]
   T069 --> T076
   T071 --> T076
@@ -6301,6 +6799,8 @@ flowchart LR
   T096 --> T076
   T097 --> T076
   T100 --> T076
+  T103 --> T076
+  T104 --> T076
 ```
 
 ### 28.7 Suggested parallelization
@@ -6315,7 +6815,8 @@ After foundation tasks complete:
 - LiveView commercial and finance/operations streams call domain contexts directly and can proceed once their domain commands/read models and design-system primitives stabilize; they do not wait on GraphQL resolver implementation.
 - Feature documentation, design-system work, and workflow-test scaffolding begin early so they constrain implementation rather than documenting it after the fact.
 - Durable-operation/failure handling is implemented alongside the first worker workflows rather than postponed to release hardening.
-- `billingctl` starts after GraphQL command/operation semantics stabilize; MCP follows the CLI client foundation and can proceed in parallel with final UI polish.
+- The detailed customer-credit ledger may proceed with pricing/correction work, but the monthly close waits for canonical hashing, ERP voucher capability, durable operations, and e-conomic preflight; close product surfaces wait for the frozen close contract.
+- `revryn` starts after GraphQL command/operation semantics stabilize; MCP follows the CLI client foundation and can proceed in parallel with final UI polish.
 - Independent verification agents join at each milestone, not only at the end.
 
 ### 28.8 Definition of Ready for an implementation task
@@ -6355,6 +6856,8 @@ A task is done only when:
 - [ ] Accrual account configuration verified for all over-time products.
 - [ ] VAT zones, customer groups, payment terms, and layouts verified in e-conomic.
 - [ ] Credit and rebill policy approved.
+- [ ] Customer-credit close journal, liability account, clearing/balancing account mappings, exact `opening - closing` e-conomic line sign, posting date, zero-delta behavior, receivable-settlement mode, refund treatment, expiry treatment, and reversal policy approved by accountant.
+- [ ] First close opening balance/import evidence approved per currency.
 - [ ] Late usage policy and materiality threshold approved.
 - [ ] Manual-versus-auto-book policy approved; first release defaults to manual.
 
@@ -6364,10 +6867,14 @@ A task is done only when:
 - [ ] Property and golden tests pass.
 - [ ] No binary floating-point money path exists.
 - [ ] Every over-time normalized line enforces service dates.
-- [ ] Discount and credit lines preserve service periods.
+- [ ] Discount and correction credit-note lines preserve service periods; customer-credit applications remain settlement value rather than revenue-adjusting lines.
 - [ ] Double-billing occurrence constraints verified under concurrency.
 - [ ] Unknown-outcome recovery demonstrated.
 - [ ] Draft and booked reconciliation demonstrated.
+- [ ] Credit-close opening/closing continuity and transaction-membership uniqueness pass under concurrency.
+- [ ] Positive, negative, zero-delta, mixed-movement, late-event, and multi-currency close cases pass.
+- [ ] Aggregate voucher contains no customer-level credit rows and no cross-currency netting.
+- [ ] Report bundle hashes and reversal/replacement chain are reproducible after backup/restore.
 
 ### 29.3 e-conomic
 
@@ -6378,11 +6885,14 @@ A task is done only when:
 - [ ] Customer and product mapping validation completed.
 - [ ] Webhook setup and polling fallback verified.
 - [ ] Draft create/update, booking, read-back, and credit flows verified.
+- [ ] Finance-voucher create/read, signed liability mapping, PDF attachment, and attachment read-back verified.
+- [ ] Monthly credit-close voucher reconciles exactly to the frozen report and detailed subledger, including `economic_liability_line = opening - closing`.
+- [ ] Unknown voucher outcome, attachment-after-voucher failure, closed period, and mismatch/reversal behavior verified.
 - [ ] Rate-limit and outage behavior tested through fake ERP.
 
 ### 29.4 Security and privacy
 
-- [ ] Organization/team/team/account scope model reviewed.
+- [ ] Organization/team/account scope model reviewed.
 - [ ] One user with conflicting roles across multiple teams passes positive and negative authorization suites.
 - [ ] Passkey registration/login/revocation/replay/origin tests pass in Playwright.
 - [ ] TOTP enrollment, replay prevention, recovery codes, step-up, and session revocation verified.
@@ -6405,6 +6915,8 @@ A task is done only when:
 - [ ] Queue and dead-letter procedures exercised.
 - [ ] Duplicate-invoice runbook exercised through simulation.
 - [ ] Booked-mismatch runbook exercised.
+- [ ] Customer-credit close mismatch/unknown-voucher runbook exercised.
+- [ ] Month-end close dashboard and alerts show cutoff, latest accepted close, unreconciled age, report/attachment status, and actionable failures.
 - [ ] One official OCI image starts a complete all-in-one deployment from an empty persistent volume.
 - [ ] Backup completed with manifest and checksums.
 - [ ] That backup was restored into a clean isolated deployment.
@@ -6435,7 +6947,8 @@ A task is done only when:
 - [ ] Compare every draft manually against expected lines and periods.
 - [ ] Book a controlled subset.
 - [ ] Verify booked line accrual dates and accounting output in e-conomic.
-- [ ] Exercise one controlled credit case.
+- [ ] Exercise one controlled customer-credit grant/application case.
+- [ ] Complete one controlled monthly customer-credit close and compare its aggregate liability voucher/report to the detailed subledger.
 - [ ] Complete post-run reconciliation and retrospective.
 - [ ] Expand cohort only after zero unexplained differences.
 
@@ -6583,7 +7096,7 @@ then Billing Core re-validates all preconditions and authorization, safely resum
 ### Scenario 23 — CLI workflow uses supported public contracts
 
 Given an integration engineer with scoped credentials,
-when they use `billingctl` to create/select a customer, preview a subscription change, submit it with an idempotency key, and inspect the returned operation,
+when they use `revryn` to create/select a customer, preview a subscription change, submit it with an idempotency key, and inspect the returned operation,
 then the command succeeds through the public application contract, `--json` output validates against its schema, and the correlation ID resolves to the same audit/operation evidence in the web UI.
 
 ### Scenario 24 — MCP agent safely previews and executes a billing change
@@ -6591,6 +7104,12 @@ then the command succeeds through the public application contract, `--json` outp
 Given an MCP client authenticated with a scoped machine identity,
 when it discovers billing tools, reads a subscription, previews a seat change, and requests the mutating tool,
 then the server returns typed bounded results, requires the configured confirmation semantics, applies team authorization and idempotency, and returns a durable operation reference without exposing arbitrary GraphQL or secrets.
+
+### Scenario 25 — Monthly aggregate customer-credit liability close
+
+Given the prior accepted DKK close has a closing balance of DKK 1,000.00 and the current month contains DKK 500.00 of grants, DKK 250.00 of applications, DKK 25.00 of refunds, and DKK 25.00 of expiries,
+when finance freezes and approves the month,
+then Billing Core produces a closing balance of DKK 1,200.00, reports a positive DKK 200.00 liability change, and supplies a debit-positive e-conomic liability-account amount of negative DKK 200.00 (`1,000 - 1,200`); it binds every included transaction to the immutable close, posts one aggregate liability adjustment plus accountant-approved aggregate balancing lines, attaches the hashed PDF report, sends no customer-level rows in the liability-close voucher, reconciles the voucher and attachment, and uses DKK 1,200.00 as the next month's opening balance.
 
 ## 31. Explicitly deferred roadmap
 
@@ -6603,9 +7122,9 @@ The following are deferred until v1 has stable production evidence:
 - multiple legal entities or multiple ERP connections inside a single team (organizations already support multiple isolated teams);
 - no-code arbitrary pricing formulas;
 - customer-facing billing portal;
-- credit balances and wallet/prepaid-credit accounting;
+- multi-purpose stored-value wallets, transferable credits, gift cards, and regulated e-money behavior beyond the scoped customer-credit subledger;
 - quotes and sales orders;
-- direct general-ledger or journal adapters;
+- generic arbitrary general-ledger or journal adapters beyond the monthly customer-credit close;
 - internal revenue schedule and revenue analytics;
 - real-time streaming broker;
 - ERP product auto-provisioning;
@@ -6628,6 +7147,8 @@ The design was checked on 2026-08-21 against the current official documentation 
 - Q2C booked invoice line documentation, including accrual status and dates.
 - e-conomic self/agreement schema for modules and agreement configuration.
 - Accounting years and periods APIs.
+- Journal voucher/finance-voucher creation and read-back APIs.
+- Journal voucher attachment upload/read-back APIs.
 - e-conomic webhooks API and event types.
 - Provider idempotency-token documentation.
 
@@ -6640,15 +7161,20 @@ Important verified constraints reflected in this design:
 - booked invoice lines expose accrual status and dates for reconciliation;
 - non-GET requests can use provider idempotency keys, with a documented cache window of approximately one hour, so durable application-side deduplication remains mandatory;
 - e-conomic provides webhook support for events such as invoice booking, with polling retained as a fallback;
+- journal vouchers can be created/read through the REST API and a PDF/image attachment can be uploaded/read for a voucher, allowing the monthly customer-credit report to be bound to the aggregate posting;
 - accounting years and periods can be queried and may be closed or barred.
 
 ### Danish bookkeeping context
 
 - The Danish Bookkeeping Act.
-- Danish Business Authority guidance on bookkeeping procedures, transaction trails, control trails, timely registration, and digital bookkeeping.
+- Danish Business Authority guidance on bookkeeping procedures, internal vouchers, transaction trails, control trails, timely registration, digital bookkeeping, and systems composed of multiple subsystems.
 - Requirements and guidance concerning preservation of original changes and financial records.
 
-This document is an engineering specification, not legal or accounting advice. The release gate requires a Danish accountant to approve the configured recognition and correction policies for the actual company and products.
+The Authority's guidance explicitly permits recording a summed amount for multiple similar transactions when the sum references and is documented by a prepared voucher such as a list, statement, or journal that specifies and references the individual transactions; it also requires a transaction trail and control trail. This is the accounting-record rationale for the immutable monthly report plus detailed Billing Core subledger, not a blanket exemption from documenting individual source events.
+
+The implementation premise is that every customer-credit economic event is recorded individually and promptly in Billing Core, while the e-conomic monthly aggregate voucher is supported by an immutable internal voucher/report that can be traced to every included ledger transaction and back again. Billing Core therefore forms part of the accounting evidence/subledger even though e-conomic remains the general ledger. The Danish guidance does not specifically certify this product design; this is an engineering interpretation of its transaction/control-trail model.
+
+This document is an engineering specification, not legal or accounting advice. The release gate requires a Danish accountant to approve the actual journal/accounts, debit-credit sign mapping, cutoff, refund/expiry/VAT treatment, first-period opening balance, correction procedure, and retention policy for the company and products.
 
 ### Lago comparison context
 
@@ -6708,13 +7234,36 @@ Implementation agents should begin with `BC-TASK-001`, create the listed ADR fil
 6. read-back reconciliation;
 7. manual booking;
 8. booked-line reconciliation;
-9. full credit.
+9. full customer credit into the detailed credit subledger;
+10. monthly customer-credit close from prior opening to current closing balance;
+11. aggregate e-conomic liability voucher, attached PDF report, and authoritative read-back reconciliation.
 
-That slice proves the architecture’s central claim: Billing Core can own deterministic commercial billing while e-conomic remains the authoritative accounting system.
+That slice proves the architecture’s central claim: Billing Core can own deterministic commercial billing and the detailed customer-credit subledger while e-conomic remains authoritative for the general ledger and posted accounting documents.
 
-Only after that slice passes sandbox certification should the team add metered usage, tiers, complex discounts, and auto-booking. The durable-operation/failure model is part of the vertical slice rather than a later hardening pass. `billingctl` and MCP follow once the public command/operation semantics are stable, and both must reuse those semantics without privileged bypasses.
+Only after that slice passes sandbox certification should the team add metered usage, tiers, complex discounts, and auto-booking. The durable-operation/failure model and monthly credit-close failure/reversal semantics are part of the slice rather than a later hardening pass. `revryn` and MCP follow once the public command/operation semantics are stable, and both must reuse those semantics without privileged bypasses.
 
 
 ### 33.1 Showcase sequencing directive
 
 The three showcase SaaS applications are deliberately **not** initial API consumers. Tier 0 must enforce this merge order: standalone feature docs → standalone implementation → standalone integration/Playwright certification → Billing Core public GraphQL stability → showcase GraphQL adapter → integrated certification. An implementation agent must not accelerate the schedule by building the showcase around Billing Core from day one. The adoption story is part of what the examples are intended to prove.
+
+## 34. Demo ERP and first-run “aha” directive
+
+This directive is the normative product detail for `BC-US-166` and is delivered through `BC-TASK-105`.
+
+Revryn must include a deliberately designed fake ERP experience so a potential user can spin up the product, understand the accounting flow, and reach a credible first “aha” moment without obtaining e-conomic credentials. This is a product experience, not merely a test double exposed in production clothing.
+
+The demo ERP must exercise the same adapter port, durable operations, idempotency rules, read-after-write reconciliation, unknown-outcome recovery, invoice lifecycle, finance-voucher lifecycle, and attachment evidence as a real provider. It must never introduce a privileged domain path or allow behavior that the production ERP boundary forbids. Demo data must be visibly synthetic, isolated from production connections, safe to reset, and rich enough to demonstrate an annual prepaid subscription, invoice preview/freeze, ERP draft and booking, customer-credit application, monthly aggregate credit close, report attachment, and reconciliation.
+
+The first-run experience must be designed and iterated as a coherent story:
+
+1. A new operator sees a purposeful empty state that explains the value and offers one obvious next action.
+2. They can select a guided demo workspace or connect a real ERP; the consequences and data boundaries are explicit.
+3. The demo creates or guides them through a small, understandable customer/product/subscription scenario rather than flooding the interface with unexplained fixtures.
+4. Each step shows cause and effect across commercial billing, the detailed credit subledger, and the aggregate ERP document.
+5. The final state makes the proof inspectable: source inputs, calculation trace, invoice, credit movements, close bridge, voucher, attachment, hashes, and reconciliation all link to one another.
+6. Resetting or replaying the demo is deterministic and does not leave stale jobs, operations, or provider state.
+
+The quality bar is intentionally higher than “a seeded dashboard.” Copy, visual hierarchy, empty states, loading and success feedback, sample names, transitions, and explanations must feel product-specific and professionally edited. Avoid generic gradients, filler metrics, unexplained cards, canned AI copy, excessive animation, and other patterns that make the experience feel like “just another AI artifact.” Every element must help the user understand why Revryn is trustworthy and how it would fit their real billing/accounting workflow.
+
+Certification requires iterative usability evidence, not only code coverage. Track time to first reconciled demo invoice and time to first reconciled customer-credit close; test clean install, empty state, guided path, interruption/resume, failure/remediation, reset, and returning-user paths; observe representative prospective users; record confusion points; and repeat until the team accepts the activation experience. Playwright must cover the deterministic happy path and at least one recoverable provider failure, while qualitative review remains required for the “aha” and non-generic design bar.

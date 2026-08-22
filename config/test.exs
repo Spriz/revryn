@@ -1,5 +1,7 @@
 import Config
 
+config :billing_core, :demo_erp_enabled, true
+
 # Configure your database
 #
 # The MIX_TEST_PARTITION environment variable can be used

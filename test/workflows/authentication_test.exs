@@ -93,7 +93,8 @@ defmodule BillingCore.Workflows.AuthenticationTest do
       assert redirected_to(conn) == ~p"/"
 
       conn = get(conn, ~p"/")
-      assert html_response(conn, 200) =~ "Your teams"
+      document = conn |> html_response(200) |> LazyHTML.from_document()
+      assert LazyHTML.filter(document, "#no-teams") != []
     end
 
     test "challenges are single-use: a replayed result is rejected", %{conn: conn} do

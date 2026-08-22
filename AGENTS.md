@@ -453,6 +453,24 @@ And **never** do this:
 This repository implements the Accrual-Aware Billing Core specified in `SPEC.md`
 (normative). Read the relevant SPEC section before changing domain behavior.
 
+### Agent startup and handoff
+
+- Read `TODO.md` immediately after this file. It is the operational ledger for
+  `todo`, `doing`, `blocked`, and `done` work keyed to the identifiers in
+  `SPEC.md`; the specification remains normative when the two differ.
+- Before editing an ID-scoped slice, move or add that ID under `Doing` in
+  `TODO.md` and record the intended boundary. Before handing off, update its
+  checklist, verification commands, open risks, and exact next action.
+- A task moves to `Done` only when its SPEC acceptance criteria are satisfied,
+  not merely when code exists. Do not silently infer status for untouched tasks.
+- Start or resume work by reading, in order: `AGENTS.md`, `TODO.md`, the relevant
+  SPEC stories/tasks/invariants, and the linked `docs/features/*.md`, accounting
+  notes, ADRs, or runbooks. Use ADRs for durable cross-cutting decisions and link
+  them from the feature documentation and `TODO.md` handoff notes.
+- Keep the Phoenix modular monolith at the repository root. The Go CLI/MCP
+  companion is a separate module under `clients/revryn/`; do not place Go
+  packages back alongside the Phoenix root directories.
+
 ### Non-negotiable invariants (SPEC §5)
 
 - No floating-point money anywhere. Money = integer minor units
@@ -492,4 +510,13 @@ This repository implements the Accrual-Aware Billing Core specified in `SPEC.md`
 - Migrations: `priv/repo/migrations/`, versions coordinate via assigned ranges
   when working in parallel.
 - Feature docs in `docs/features/*.md` are the product source of truth (INV-021).
+- `README.md` explains the repository map; `docs/accounting/*.md` records
+  accountant-facing policy and sign conventions; `docs/adr/*.md` records
+  accepted architectural decisions. Link to these sources instead of copying
+  their content into agent-only notes.
+- Secrets: maintainer secrets (sandbox certification) live age-encrypted in
+  the committed `fnox.toml` via fnox (`fnox exec -- <cmd>`); deployment
+  secrets are deployer-owned env vars with `<NAME>_FILE` indirection
+  (ADR-032, `docs/runbooks/secrets.md`). Never commit an age identity or a
+  plaintext secret.
 <!-- billing-core:end -->

@@ -39,7 +39,7 @@ defmodule BillingCoreWeb.Layouts do
       <div class="flex-1">
         <a href="/" class="flex w-fit items-center gap-2">
           <img src={~p"/images/logo.svg"} width="28" />
-          <span class="text-sm font-semibold">Billing Core</span>
+          <span class="text-sm font-semibold">Revryn</span>
         </a>
       </div>
       <div class="flex-none">

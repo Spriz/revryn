@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Search {{ organization.name }}</h1>
+<form method="get" id="search-form" class="card">
+  <input name="q" value="{{ query }}" placeholder="Search tasks…">
+  <button id="search-submit">Search</button>
+</form>
+{% if query %}
+<form method="post" action="{% url 'save_filter' organization.slug %}" class="inline" id="save-filter-form">{% csrf_token %}
+  <input type="hidden" name="q" value="{{ query }}">
+  <input name="name" placeholder="Save this search as…" required>
+  <button id="save-filter-submit">Save filter</button>
+</form>
+{% endif %}
+<ul id="saved-filters">
+  {% for saved in saved_filters %}<li><a href="?q={{ saved.query|urlencode }}">{{ saved.name }}</a></li>{% endfor %}
+</ul>
+<ul class="cardlist" id="search-results">
+  {% for task in tasks %}
+  <li><a href="{% url 'task_detail' task.id %}">{{ task.title }}</a>
+      <span class="muted">{{ task.column.board.project.name }} · {{ task.column.name }}</span></li>
+  {% empty %}{% if query %}<li id="no-results">Nothing found.</li>{% endif %}
+  {% endfor %}
+</ul>
+{% endblock %}

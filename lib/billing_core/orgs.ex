@@ -35,6 +35,7 @@ defmodule BillingCore.Orgs do
   alias BillingCore.Orgs.{
     Account,
     AccountTeamCustomer,
+    Invitation,
     Organization,
     OrganizationMembership,
     Team,
@@ -77,6 +78,9 @@ defmodule BillingCore.Orgs do
              team_membership: TeamMembership.t()
            }}
           | {:error, Ecto.Changeset.t()}
+  # Dialyzer false positive: the literal Multi.new() loses MapSet's
+  # opaqueness when inlined into the Multi.insert call.
+  @dialyzer {:no_opaque, create_organization: 2}
   def create_organization(attrs, %User{} = creator) do
     attrs = Map.new(attrs)
     name = attrs[:name]
@@ -733,6 +737,499 @@ defmodule BillingCore.Orgs do
 
         projection
       end)
+    end
+  end
+
+  @doc "Organization ids where `user` holds an active owner/admin membership."
+  @spec list_admin_organization_ids(User.t()) :: MapSet.t(Ecto.UUID.t())
+  def list_admin_organization_ids(%User{} = user) do
+    Repo.all(
+      from m in OrganizationMembership,
+        where: m.user_id == ^user.id and m.status == :active,
+        select: {m.organization_id, m.roles}
+    )
+    |> Enum.filter(fn {_org_id, roles} ->
+      :organization_owner in roles or :organization_admin in roles
+    end)
+    |> MapSet.new(fn {org_id, _roles} -> org_id end)
+  end
+
+  @doc """
+  Active team memberships with each member's primary email, for the
+  membership administration surface (BC-US-141). Requires a team-scoped
+  member of the team (any role); mutations stay behind the admin commands.
+  """
+  @spec list_team_members(Scope.t()) ::
+          {:ok, [%{membership: TeamMembership.t(), email: String.t() | nil}]}
+          | {:error, :unauthorized}
+  def list_team_members(%Scope{team: %Team{id: team_id}} = scope) do
+    if Scope.team_scoped?(scope) do
+      memberships =
+        Repo.all(
+          from m in TeamMembership,
+            where: m.team_id == ^team_id and m.status == :active,
+            order_by: [asc: m.created_at]
+        )
+
+      {:ok, attach_primary_emails(memberships)}
+    else
+      {:error, :unauthorized}
+    end
+  end
+
+  def list_team_members(_scope), do: {:error, :unauthorized}
+
+  @doc """
+  Active organization memberships with each member's primary email
+  (SPEC §14.5 `organizationMemberships`). Requires an organization
+  owner/admin scope — the directory exposes member emails.
+  """
+  @spec list_organization_members(Scope.t()) ::
+          {:ok, [%{membership: OrganizationMembership.t(), email: String.t() | nil}]}
+          | {:error, :unauthorized}
+  def list_organization_members(%Scope{} = scope) do
+    with :ok <- authorize_org_admin(scope) do
+      memberships =
+        Repo.all(
+          from m in OrganizationMembership,
+            where: m.organization_id == ^scope.organization.id and m.status == :active,
+            order_by: [asc: m.created_at]
+        )
+
+      {:ok, attach_primary_emails(memberships)}
+    end
+  end
+
+  @doc """
+  Organization-admin command: replaces a member's organization roles
+  (SPEC §14.5 `changeOrganizationRoles`). The membership must belong to
+  the scope's organization; demoting the last active owner is refused by
+  `change_organization_roles/3`.
+  """
+  @spec admin_change_organization_roles(Scope.t(), Ecto.UUID.t(), [String.t() | atom()]) ::
+          {:ok, OrganizationMembership.t()} | {:error, term()}
+  def admin_change_organization_roles(%Scope{} = scope, membership_id, roles) do
+    with :ok <- authorize_org_admin(scope),
+         {:ok, cast} <- cast_roles(roles, OrganizationMembership.roles()),
+         :ok <- ensure_nonempty_roles(cast),
+         {:ok, membership} <- fetch_organization_membership(scope, membership_id) do
+      change_organization_roles(membership, cast, scope)
+    end
+  end
+
+  @doc """
+  Team-admin command: adds an existing organization member to the scope's
+  team (SPEC §14.5 `addTeamMember`). The user must already hold an active
+  membership in the owning organization — team access is never implicit
+  (INV-024); `add_team_member/4` enforces it.
+  """
+  @spec admin_add_team_member(Scope.t(), Ecto.UUID.t(), [String.t() | atom()]) ::
+          {:ok, TeamMembership.t()} | {:error, term()}
+  def admin_add_team_member(%Scope{} = scope, user_id, roles) do
+    with :ok <- authorize_team_admin(scope),
+         {:ok, cast} <- cast_roles(roles, TeamMembership.roles()),
+         :ok <- ensure_nonempty_roles(cast),
+         {:ok, user} <- fetch_active_user(user_id) do
+      add_team_member(scope.team, user, cast, scope)
+    end
+  end
+
+  @doc "Team-admin command: renames the scope's team (SPEC §14.5 `renameTeam`)."
+  @spec admin_rename_team(Scope.t(), String.t()) ::
+          {:ok, Team.t()} | {:error, term()}
+  def admin_rename_team(%Scope{} = scope, new_name) do
+    with :ok <- authorize_team_admin(scope) do
+      rename_team(scope.team, new_name, scope)
+    end
+  end
+
+  @doc """
+  Organization-admin command: archives a team of the scope's organization
+  (SPEC §14.5 `archiveTeam`). The final active team of an active
+  organization stays protected by `archive_team/2` (INV-033).
+  """
+  @spec admin_archive_team(Scope.t(), Ecto.UUID.t()) ::
+          {:ok, Team.t()} | {:error, term()}
+  def admin_archive_team(%Scope{} = scope, team_id) do
+    with :ok <- authorize_org_admin(scope),
+         {:ok, team} <- fetch_organization_team(scope, team_id) do
+      archive_team(team, scope)
+    end
+  end
+
+  @doc """
+  Team-admin command: changes a member's roles in the scope's team
+  (BC-US-141). Roles are cast against the canonical set; the membership
+  must belong to the scope's team.
+  """
+  @spec admin_change_team_roles(Scope.t(), Ecto.UUID.t(), [String.t() | atom()]) ::
+          {:ok, TeamMembership.t()} | {:error, term()}
+  def admin_change_team_roles(%Scope{} = scope, membership_id, roles) do
+    with :ok <- authorize_team_admin(scope),
+         {:ok, cast} <- cast_roles(roles, TeamMembership.roles()),
+         :ok <- ensure_nonempty_roles(cast),
+         {:ok, membership} <- fetch_team_membership(scope, membership_id) do
+      change_team_roles(membership, cast, scope)
+    end
+  end
+
+  @doc "Team-admin command: removes a member from the scope's team (BC-US-141)."
+  @spec admin_remove_team_member(Scope.t(), Ecto.UUID.t()) ::
+          {:ok, TeamMembership.t()} | {:error, term()}
+  def admin_remove_team_member(%Scope{} = scope, membership_id) do
+    with :ok <- authorize_team_admin(scope),
+         {:ok, membership} <- fetch_team_membership(scope, membership_id) do
+      remove_team_member(membership, scope)
+    end
+  end
+
+  defp authorize_team_admin(%Scope{} = scope) do
+    if Scope.team_scoped?(scope) and Scope.has_team_role?(scope, [:team_admin]),
+      do: :ok,
+      else: {:error, :unauthorized}
+  end
+
+  defp ensure_nonempty_roles([]), do: {:error, :invalid_roles}
+  defp ensure_nonempty_roles(_roles), do: :ok
+
+  defp fetch_team_membership(%Scope{team: %Team{id: team_id}}, membership_id) do
+    case Repo.get_by(TeamMembership, id: membership_id, team_id: team_id, status: :active) do
+      nil -> {:error, :not_found}
+      membership -> {:ok, membership}
+    end
+  end
+
+  defp fetch_organization_membership(%Scope{organization: %Organization{id: org_id}}, id) do
+    case Repo.get_by(OrganizationMembership, id: id, organization_id: org_id, status: :active) do
+      nil -> {:error, :not_found}
+      membership -> {:ok, membership}
+    end
+  end
+
+  defp fetch_organization_team(%Scope{organization: %Organization{id: org_id}}, team_id) do
+    case Repo.get_by(Team, id: team_id, organization_id: org_id) do
+      nil -> {:error, :not_found}
+      team -> {:ok, team}
+    end
+  end
+
+  defp fetch_active_user(user_id) do
+    case Ecto.UUID.cast(user_id) do
+      {:ok, uuid} ->
+        case Repo.get(User, uuid) do
+          %User{status: :active} = user -> {:ok, user}
+          _other -> {:error, :not_found}
+        end
+
+      :error ->
+        {:error, :not_found}
+    end
+  end
+
+  defp attach_primary_emails(memberships) do
+    user_ids = Enum.map(memberships, & &1.user_id)
+
+    emails =
+      Repo.all(
+        from e in BillingCore.Identity.UserEmail,
+          where: e.user_id in ^user_ids and e.primary == true,
+          select: {e.user_id, e.email}
+      )
+      |> Map.new()
+
+    Enum.map(memberships, fn membership ->
+      %{membership: membership, email: Map.get(emails, membership.user_id)}
+    end)
+  end
+
+  ## Invitations (BC-US-144)
+
+  @invitation_ttl_days 7
+
+  @doc """
+  Invites `email` to organization/team memberships (BC-US-144). Requires an
+  organization owner/admin scope on the target organization. Attrs:
+  `:email` (required), `:organization_roles`, `:team_id` + `:team_roles`
+  (the team must belong to the scope's organization; at least one role
+  grant overall). Returns the invitation and the raw single-use token —
+  the only moment it exists; only its SHA-256 is stored.
+
+  When `:accept_url_fun` is given, an invitation email is delivered
+  best-effort through the mail platform; delivery failure never voids the
+  invitation (the returned token can be shared out of band).
+  """
+  @spec invite_member(Scope.t(), map() | keyword()) ::
+          {:ok,
+           %{invitation: Invitation.t(), token: String.t(), delivery: :sent | :failed | :skipped}}
+          | {:error, term()}
+  def invite_member(%Scope{} = scope, attrs) do
+    attrs = Map.new(attrs)
+
+    with :ok <- authorize_org_admin(scope),
+         {:ok, email} <- cast_invitation_email(attrs[:email]),
+         {:ok, org_roles} <-
+           cast_roles(attrs[:organization_roles] || [], OrganizationMembership.roles()),
+         {:ok, team, team_roles} <- cast_invitation_team(scope, attrs),
+         :ok <- ensure_invitation_grants(org_roles, team, team_roles) do
+      token = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
+
+      {:ok, invitation} =
+        Repo.transaction(fn ->
+          invitation =
+            Repo.insert!(%Invitation{
+              organization_id: scope.organization.id,
+              team_id: team && team.id,
+              email: email,
+              organization_roles: Enum.map(org_roles, &Atom.to_string/1),
+              team_roles: Enum.map(team_roles, &Atom.to_string/1),
+              token_hash: hash_invitation_token(token),
+              invited_by: scope.user && scope.user.id,
+              expires_at: DateTime.add(DateTime.utc_now(), @invitation_ttl_days, :day)
+            })
+
+          audit!(scope, "orgs.invitation.created",
+            aggregate: {"organization_invitation", invitation.id},
+            organization_id: scope.organization.id,
+            team_id: team && team.id,
+            payload: %{
+              email: email,
+              organization_roles: invitation.organization_roles,
+              team_roles: invitation.team_roles
+            }
+          )
+
+          invitation
+        end)
+
+      delivery = deliver_invitation(invitation, token, attrs[:accept_url_fun])
+      {:ok, %{invitation: invitation, token: token, delivery: delivery}}
+    end
+  end
+
+  @doc """
+  Accepts an invitation for the authenticated `user` (BC-US-144). The raw
+  token is hashed for lookup; the invitation must be pending and its email
+  must belong to the user — the grant links the existing global identity,
+  it never creates a duplicate. Membership grants are additive within the
+  invited organization/team only.
+  """
+  @spec accept_invitation(User.t(), String.t()) ::
+          {:ok, Invitation.t()} | {:error, :invalid_invitation | :email_mismatch | term()}
+  def accept_invitation(%User{} = user, token) when is_binary(token) do
+    now = DateTime.utc_now()
+
+    Repo.transaction(fn ->
+      invitation =
+        Repo.one(
+          from i in Invitation,
+            where: i.token_hash == ^hash_invitation_token(token),
+            lock: "FOR UPDATE"
+        )
+
+      cond do
+        is_nil(invitation) or not Invitation.pending?(invitation, now) ->
+          Repo.rollback(:invalid_invitation)
+
+        not user_owns_email?(user, invitation.email) ->
+          Repo.rollback(:email_mismatch)
+
+        true ->
+          apply_invitation_grants!(user, invitation)
+
+          accepted =
+            invitation
+            |> Ecto.Changeset.change(accepted_at: now, accepted_user_id: user.id)
+            |> Repo.update!()
+
+          audit!(:system, "orgs.invitation.accepted",
+            aggregate: {"organization_invitation", accepted.id},
+            organization_id: accepted.organization_id,
+            team_id: accepted.team_id,
+            payload: %{user_id: user.id, email: accepted.email}
+          )
+
+          accepted
+      end
+    end)
+  end
+
+  @doc "Revokes a pending invitation of the scope's organization."
+  @spec revoke_invitation(Scope.t(), Ecto.UUID.t()) ::
+          {:ok, Invitation.t()} | {:error, term()}
+  def revoke_invitation(%Scope{} = scope, invitation_id) do
+    with :ok <- authorize_org_admin(scope) do
+      Repo.transaction(fn ->
+        invitation =
+          Repo.one(
+            from i in Invitation,
+              where:
+                i.id == ^invitation_id and i.organization_id == ^scope.organization.id and
+                  is_nil(i.accepted_at) and is_nil(i.revoked_at),
+              lock: "FOR UPDATE"
+          ) || Repo.rollback(:not_found)
+
+        revoked =
+          invitation
+          |> Ecto.Changeset.change(revoked_at: DateTime.utc_now())
+          |> Repo.update!()
+
+        audit!(scope, "orgs.invitation.revoked",
+          aggregate: {"organization_invitation", revoked.id},
+          organization_id: revoked.organization_id,
+          team_id: revoked.team_id,
+          payload: %{email: revoked.email}
+        )
+
+        revoked
+      end)
+    end
+  end
+
+  @doc "Invitations of the scope's organization, newest first."
+  @spec list_invitations(Scope.t()) :: {:ok, [Invitation.t()]} | {:error, :unauthorized}
+  def list_invitations(%Scope{} = scope) do
+    with :ok <- authorize_org_admin(scope) do
+      {:ok,
+       Repo.all(
+         from i in Invitation,
+           where: i.organization_id == ^scope.organization.id,
+           order_by: [desc: i.created_at]
+       )}
+    end
+  end
+
+  defp authorize_org_admin(%Scope{organization: %Organization{}} = scope) do
+    if Scope.has_organization_role?(scope, [:organization_owner, :organization_admin]),
+      do: :ok,
+      else: {:error, :unauthorized}
+  end
+
+  defp authorize_org_admin(_scope), do: {:error, :unauthorized}
+
+  defp cast_invitation_email(email) when is_binary(email) do
+    normalized = email |> String.trim() |> String.downcase()
+
+    if normalized =~ ~r/^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+      do: {:ok, normalized},
+      else: {:error, :invalid_email}
+  end
+
+  defp cast_invitation_email(_email), do: {:error, :invalid_email}
+
+  # Role inputs may arrive as strings from UI/API; resolve against the
+  # canonical sets without String.to_atom/1.
+  defp cast_roles(roles, valid) when is_list(roles) do
+    cast =
+      Enum.map(roles, fn role ->
+        Enum.find(valid, &(&1 == role or Atom.to_string(&1) == role))
+      end)
+
+    if Enum.any?(cast, &is_nil/1), do: {:error, :invalid_roles}, else: {:ok, Enum.uniq(cast)}
+  end
+
+  defp cast_roles(_roles, _valid), do: {:error, :invalid_roles}
+
+  defp cast_invitation_team(scope, attrs) do
+    case attrs[:team_id] do
+      nil ->
+        {:ok, nil, []}
+
+      team_id ->
+        with %Team{} = team <- Repo.get(Team, team_id),
+             true <- team.organization_id == scope.organization.id,
+             {:ok, team_roles} <- cast_roles(attrs[:team_roles] || [], TeamMembership.roles()) do
+          {:ok, team, team_roles}
+        else
+          {:error, reason} -> {:error, reason}
+          _other -> {:error, :team_not_in_organization}
+        end
+    end
+  end
+
+  defp ensure_invitation_grants(org_roles, team, team_roles) do
+    cond do
+      org_roles != [] -> :ok
+      team != nil and team_roles != [] -> :ok
+      true -> {:error, :no_grants}
+    end
+  end
+
+  defp apply_invitation_grants!(user, invitation) do
+    organization = Repo.get!(Organization, invitation.organization_id)
+    {:ok, org_roles} = cast_roles(invitation.organization_roles, OrganizationMembership.roles())
+
+    base_org_roles = if org_roles == [], do: [:organization_member], else: org_roles
+
+    case Repo.get_by(OrganizationMembership,
+           organization_id: organization.id,
+           user_id: user.id
+         ) do
+      nil ->
+        {:ok, _membership} = add_organization_member(organization, user, base_org_roles)
+
+      %OrganizationMembership{} = membership ->
+        merged = Enum.uniq(membership.roles ++ org_roles)
+
+        if merged != membership.roles or membership.status != :active do
+          {:ok, _} =
+            membership
+            |> Ecto.Changeset.change(status: :active)
+            |> Repo.update!()
+            |> change_organization_roles(merged)
+        end
+    end
+
+    if invitation.team_id do
+      team = Repo.get!(Team, invitation.team_id)
+      {:ok, team_roles} = cast_roles(invitation.team_roles, TeamMembership.roles())
+
+      case Repo.get_by(TeamMembership, team_id: team.id, user_id: user.id) do
+        nil ->
+          {:ok, _membership} = add_team_member(team, user, team_roles)
+
+        %TeamMembership{} = membership ->
+          merged = Enum.uniq(membership.roles ++ team_roles)
+
+          {:ok, _} =
+            membership
+            |> Ecto.Changeset.change(status: :active)
+            |> Repo.update!()
+            |> change_team_roles(merged)
+      end
+    end
+
+    :ok
+  end
+
+  defp user_owns_email?(user, invitation_email) do
+    Repo.exists?(
+      from e in BillingCore.Identity.UserEmail,
+        where:
+          e.user_id == ^user.id and
+            fragment("lower(?)", e.email) == ^String.downcase(invitation_email)
+    )
+  end
+
+  defp hash_invitation_token(token) do
+    :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
+  end
+
+  defp deliver_invitation(_invitation, _token, nil), do: :skipped
+
+  defp deliver_invitation(invitation, token, accept_url_fun)
+       when is_function(accept_url_fun, 1) do
+    organization = Repo.get!(Organization, invitation.organization_id)
+
+    email =
+      BillingCore.Notifications.build!("invitation", %{
+        "to" => invitation.email,
+        "organization_name" => organization.name,
+        "url" => accept_url_fun.(token)
+      })
+
+    case BillingCore.Mailer.deliver(email) do
+      {:ok, _metadata} -> :sent
+      {:error, _reason} -> :failed
     end
   end
 

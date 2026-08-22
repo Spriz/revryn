@@ -1,0 +1,57 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  description: string;
+}
+const { title, description } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+const repo = "https://github.com/spriz/revryn";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <link
+      rel="icon"
+      href={`data:image/svg+xml,${encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="%230b0e14"/><text x="16" y="22" font-family="monospace" font-size="17" font-weight="bold" fill="%234fd6be" text-anchor="middle">R</text></svg>',
+      )}`}
+    />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="wrap">
+        <a class="brand" href={`${base}/`}>revryn<span class="tld">.dev</span></a>
+        <nav class="site-nav">
+          <a href={`${base}/features/`}>Features</a>
+          <a href={`${base}/graphql/`} class="keep">GraphQL API</a>
+          <a href={`${base}/#how-it-works`}>How it works</a>
+          <a href={repo} class="gh">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <slot />
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <span>Revryn — accrual-aware billing core. Apache-2.0.</span>
+        <a href={`${base}/features/`}>Feature docs</a>
+        <a href={`${base}/graphql/`}>GraphQL reference</a>
+        <a href={repo}>Source</a>
+      </div>
+    </footer>
+  </body>
+</html>

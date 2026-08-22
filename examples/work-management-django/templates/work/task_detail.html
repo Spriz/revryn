@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 id="task-title">{{ task.title }}</h1>
+<p><a href="{% url 'board_detail' task.column.board.id %}">&larr; {{ task.column.board.name }}</a>
+   · in <strong id="task-column">{{ task.column.name }}</strong></p>
+
+<div class="grid2">
+<section class="card">
+  <h2>Move</h2>
+  <form method="post" action="{% url 'move_task' task.id %}" id="move-task-form">{% csrf_token %}
+    <select name="column_id">
+      {% for column in columns %}<option value="{{ column.id }}" {% if column.id == task.column_id %}selected{% endif %}>{{ column.name }}</option>{% endfor %}
+    </select>
+    <input type="hidden" name="next" value="/tasks/{{ task.id }}/">
+    <button id="move-task-submit">Move</button>
+  </form>
+
+  <h2>Assignment &amp; due date</h2>
+  <form method="post" action="{% url 'assign_task' task.id %}" id="assign-form">{% csrf_token %}
+    <select name="assignee_id">
+      <option value="">Unassigned</option>
+      {% for membership in members %}<option value="{{ membership.user.id }}" {% if task.assignee_id == membership.user.id %}selected{% endif %}>{{ membership.user.display_name }}</option>{% endfor %}
+    </select>
+    <input type="date" name="due_date" value="{{ task.due_date|date:'Y-m-d' }}">
+    <button id="assign-submit">Save</button>
+  </form>
+
+  <h2>Labels</h2>
+  <div class="labels">
+    {% for label in project_labels %}
+    <form method="post" action="{% url 'toggle_label' task.id %}" class="inline">{% csrf_token %}
+      <input type="hidden" name="label_id" value="{{ label.id }}">
+      <button class="chip {% if label in task.labels.all %}on{% endif %}" style="background: {{ label.color }}">{{ label.name }}</button>
+    </form>
+    {% endfor %}
+  </div>
+
+  <h2>Attachments</h2>
+  <ul id="attachment-list">
+    {% for attachment in task.attachments.all %}<li>{{ attachment.filename }} <span class="muted">{{ attachment.byte_size }} bytes</span></li>{% endfor %}
+  </ul>
+  <form method="post" action="{% url 'add_attachment_meta' task.id %}" class="inline" id="attachment-form">{% csrf_token %}
+    <input name="filename" placeholder="design.fig" required>
+    <input name="byte_size" type="number" value="0">
+    <button>Record attachment</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Comments</h2>
+  <ul id="comment-list">
+    {% for comment in task.comments.all %}
+    <li><strong>{{ comment.author.display_name }}</strong> {{ comment.body }} <span class="muted">{{ comment.created_at }}</span></li>
+    {% endfor %}
+  </ul>
+  <form method="post" action="{% url 'add_comment' task.id %}" id="comment-form">{% csrf_token %}
+    <textarea name="body" required placeholder="Write a comment…"></textarea>
+    <button id="comment-submit">Comment</button>
+  </form>
+</section>
+</div>
+{% endblock %}

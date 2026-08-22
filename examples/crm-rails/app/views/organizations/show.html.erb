@@ -1,0 +1,19 @@
+<h1><%= @organization.name %></h1>
+<nav class="subnav">
+  <a id="org-companies" href="<%= organization_companies_path(@organization.slug) %>">Companies</a>
+  <a id="org-contacts" href="<%= organization_contacts_path(@organization.slug) %>">Contacts</a>
+  <% @pipelines.each do |pipeline| %>
+    <a id="pipeline-<%= pipeline.id %>" href="<%= organization_pipeline_deals_path(@organization.slug, pipeline.id) %>"><%= pipeline.name %> pipeline</a>
+  <% end %>
+  <a id="org-members" href="<%= organization_members_path(@organization.slug) %>">Members</a>
+  <a id="org-search" href="<%= organization_search_path(@organization.slug) %>">Search</a>
+  <a id="org-activity" href="<%= organization_activity_path(@organization.slug) %>">Activity</a>
+  <a id="org-billing" href="<%= organization_billing_path(@organization.slug) %>">Billing</a>
+</nav>
+<h2>Recent activity</h2>
+<ul class="cardlist" id="recent-activity">
+  <% @recent.each do |activity| %>
+    <li><span class="muted"><%= activity.created_at.strftime("%Y-%m-%d %H:%M") %></span>
+        <strong><%= activity.actor&.display_name %></strong> <%= activity.summary %></li>
+  <% end %>
+</ul>

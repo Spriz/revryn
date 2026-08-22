@@ -1,0 +1,8 @@
+<h1>Create your account</h1>
+<%= form_with url: register_path, method: :post, html: { id: "register-form", class: "card narrow" } do %>
+  <label>Full name <input name="full_name"></label>
+  <label>Email <input type="email" name="email" required></label>
+  <label>Password <input type="password" name="password" minlength="8" required></label>
+  <button id="register-submit">Create account</button>
+  <p><a href="<%= login_path %>">Already registered? Sign in</a></p>
+<% end %>

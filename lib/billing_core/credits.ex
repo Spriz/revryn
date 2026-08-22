@@ -46,6 +46,7 @@ defmodule BillingCore.Credits do
   alias BillingCore.Domain.{Money, StateMachine}
   alias BillingCore.Operations.Operation
   alias BillingCore.Orgs.Account
+  alias BillingCore.Orgs.Team
 
   @mutation_roles [:finance_operator, :billing_admin]
   @read_roles @mutation_roles ++ [:team_admin, :auditor, :integration_client]
@@ -137,6 +138,18 @@ defmodule BillingCore.Credits do
 
             credit_account
           end)
+      end
+    end
+  end
+
+  @doc "Fetches one credit account of the scope's team."
+  @spec get_credit_account(Scope.t(), Ecto.UUID.t()) ::
+          {:ok, CreditAccount.t()} | {:error, :unauthorized | :not_found}
+  def get_credit_account(%Scope{} = scope, id) do
+    with :ok <- authorize(scope, @read_roles) do
+      case Repo.get_by(CreditAccount, id: id, team_id: Scope.team_id!(scope)) do
+        nil -> {:error, :not_found}
+        account -> {:ok, account}
       end
     end
   end
@@ -1445,6 +1458,8 @@ defmodule BillingCore.Credits do
       operation_id: attrs[:operation_id],
       reason_code: attrs[:reason_code],
       actor_reference: actor_reference(actor),
+      accounting_effective_on:
+        accounting_effective_on!(actor, account.team_id, attrs.occurred_at),
       occurred_at: attrs.occurred_at,
       metadata: attrs[:metadata] || %{}
     })
@@ -1524,6 +1539,26 @@ defmodule BillingCore.Credits do
   defp actor_organization_id(:system), do: nil
   defp actor_organization_id(%Scope{organization: %{id: id}}), do: id
   defp actor_organization_id(%Scope{}), do: nil
+
+  defp accounting_effective_on!(
+         %Scope{team: %{id: team_id, time_zone: time_zone}},
+         team_id,
+         occurred_at
+       ) do
+    local_date!(occurred_at, time_zone)
+  end
+
+  defp accounting_effective_on!(_actor, team_id, occurred_at) do
+    team = Repo.get!(Team, team_id)
+    local_date!(occurred_at, team.time_zone)
+  end
+
+  defp local_date!(occurred_at, time_zone) do
+    case DateTime.shift_zone(occurred_at, time_zone) do
+      {:ok, local} -> DateTime.to_date(local)
+      {:error, reason} -> Repo.rollback({:invalid_accounting_time_zone, time_zone, reason})
+    end
+  end
 
   defp current_policy_row(team_id, account_id, now) do
     Repo.one(

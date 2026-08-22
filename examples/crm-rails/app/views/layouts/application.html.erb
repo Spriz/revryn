@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Kystvej CRM</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <%= csrf_meta_tags %>
+    <%= csp_meta_tag %>
+    <%= stylesheet_link_tag :app %>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/">Kystvej CRM</a>
+      <nav>
+        <% if current_user %>
+          <span class="muted"><%= current_user.email %></span>
+          <%= button_to "Sign out", logout_path, method: :delete, class: "linklike", id: "nav-logout" %>
+        <% else %>
+          <a href="<%= login_path %>">Sign in</a>
+          <a href="<%= register_path %>">Register</a>
+        <% end %>
+      </nav>
+    </header>
+    <% if notice %><div class="flash" id="flash-notice"><%= notice %></div><% end %>
+    <% if alert %><div class="flash error" id="flash-alert"><%= alert %></div><% end %>
+    <main><%= yield %></main>
+  </body>
+</html>

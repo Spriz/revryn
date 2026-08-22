@@ -2,6 +2,8 @@ defmodule BillingCore.Billing.BillingRun do
   @moduledoc "Billing run (SPEC §13.3, §18.1)."
   use Ecto.Schema
 
+  @type t :: %__MODULE__{}
+
   @schema_prefix "billing"
   @primary_key {:id, Ecto.UUID, autogenerate: true}
   @timestamps_opts [type: :utc_datetime_usec, inserted_at: :created_at]
@@ -22,6 +24,8 @@ end
 defmodule BillingCore.Billing.Charge do
   @moduledoc "Immutable rated charge before invoice consolidation (SPEC §13.3)."
   use Ecto.Schema
+
+  @type t :: %__MODULE__{}
 
   @schema_prefix "billing"
   @primary_key {:id, Ecto.UUID, autogenerate: true}
@@ -71,6 +75,8 @@ defmodule BillingCore.Billing.InvoiceIntent do
   @moduledoc "Immutable frozen invoice intent (SPEC §13.3, INV-013)."
   use Ecto.Schema
 
+  @type t :: %__MODULE__{}
+
   @schema_prefix "billing"
   @primary_key {:id, Ecto.UUID, autogenerate: true}
   schema "invoice_intents" do
@@ -99,6 +105,8 @@ defmodule BillingCore.Billing.InvoiceLine do
   @moduledoc "Immutable normalized invoice line (SPEC §13.3, INV-003/004)."
   use Ecto.Schema
 
+  @type t :: %__MODULE__{}
+
   @schema_prefix "billing"
   @primary_key {:id, Ecto.UUID, autogenerate: true}
   schema "invoice_lines" do
@@ -126,6 +134,8 @@ end
 defmodule BillingCore.Billing.IntentLifecycle do
   @moduledoc "Mutable lifecycle projection for an invoice intent (SPEC §13.3)."
   use Ecto.Schema
+
+  @type t :: %__MODULE__{}
 
   @schema_prefix "billing"
   @primary_key {:invoice_intent_id, Ecto.UUID, autogenerate: false}

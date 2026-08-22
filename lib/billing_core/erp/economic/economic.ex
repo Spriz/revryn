@@ -34,6 +34,7 @@ defmodule BillingCore.ERP.Economic do
   alias BillingCore.ERP.{CanonicalInvoice, Document}
   alias BillingCore.ERP.CanonicalInvoice.Line
   alias BillingCore.ERP.Economic.{Client, Normalizer}
+  alias BillingCore.ERP.Vouchers.{AttachmentEvidence, FinanceVoucher, FinanceVoucherLine, Voucher}
 
   @capabilities %{
     supports_draft_invoices: true,
@@ -42,6 +43,9 @@ defmodule BillingCore.ERP.Economic do
     supports_invoice_webhooks: true,
     supports_line_accrual_periods: true,
     supports_customer_provisioning: true,
+    supports_customer_credit_settlements: false,
+    supports_finance_vouchers: true,
+    supports_voucher_attachments: true,
     supported_delivery_modes: [:none, :email, :einvoice],
     amount_scale: 2,
     quantity_scale: 2
@@ -556,6 +560,386 @@ defmodule BillingCore.ERP.Economic do
     case Map.get(booking_options, :external_reference) do
       nil -> [{:draft, stringify(draft_id)}]
       reference -> [{:draft, stringify(draft_id)}, {:external_reference, reference}]
+    end
+  end
+
+  # -- finance vouchers (SPEC §17.16) ----------------------------------------
+
+  @impl true
+  def create_finance_voucher(context, %FinanceVoucher{} = voucher, operation_key) do
+    with :ok <- FinanceVoucher.validate(voucher) do
+      journal = voucher.journal_external_id
+      body = finance_voucher_body(voucher)
+
+      case Client.post(context, "/journals/#{journal}/vouchers", body, operation_key) do
+        {:ok, %{status: status, body: response_body}} when status in 200..299 ->
+          case normalize_finance_voucher(response_body, voucher) do
+            {:ok, normalized} ->
+              {:ok, normalized}
+
+            :unknown ->
+              {:unknown,
+               %{
+                 search_by: [{:external_reference, voucher.external_reference}],
+                 detail:
+                   "voucher accepted but response lacked a voucher number; reconcile before retry"
+               }}
+          end
+
+        {:ok, response} ->
+          {:error, classify(response)}
+
+        {:error, {:transport, reason}} ->
+          {:unknown, write_lost_hint(reason, [{:external_reference, voucher.external_reference}])}
+      end
+    end
+  end
+
+  @impl true
+  def find_finance_voucher(context, external_reference) when is_binary(external_reference) do
+    journal = finance_journal(context)
+
+    case Client.get(context, "/journals/#{journal}/vouchers",
+           params: [filter: "text$eq:#{external_reference}"]
+         ) do
+      {:ok, %{status: status, body: body}} when status in 200..299 ->
+        case body |> Map.get("collection", []) |> List.first() do
+          nil ->
+            {:ok, nil}
+
+          payload ->
+            case normalize_finance_voucher(
+                   payload,
+                   finance_voucher_defaults(context, external_reference)
+                 ) do
+              {:ok, voucher} ->
+                {:ok, voucher}
+
+              :unknown ->
+                {:error, {:provider_failure, "voucher search hit lacked required fields"}}
+            end
+        end
+
+      {:ok, response} ->
+        {:error, classify(response)}
+
+      {:error, {:transport, reason}} ->
+        {:error, {:provider_failure, reason}}
+    end
+  end
+
+  @impl true
+  def get_finance_voucher(context, {:voucher, voucher_number}) do
+    journal = finance_journal(context)
+    year = finance_accounting_year(context)
+
+    fetch_finance_voucher(context, journal, year, voucher_number)
+  end
+
+  def get_finance_voucher(context, {:external_reference, external_reference}) do
+    find_finance_voucher(context, external_reference)
+  end
+
+  @impl true
+  def attach_voucher_report(context, voucher_ref, %AttachmentEvidence{} = evidence, operation_key) do
+    with :ok <- AttachmentEvidence.validate(evidence, require_content: true),
+         {:ok, %Voucher{} = voucher} <- resolve_finance_voucher(context, voucher_ref) do
+      path = attachment_file_path(voucher)
+
+      case Client.post_multipart(
+             context,
+             path,
+             [
+               file:
+                 {evidence.content,
+                  filename: evidence.filename, content_type: evidence.content_type}
+             ],
+             operation_key
+           ) do
+        {:ok, %{status: status}} when status in 200..299 ->
+          :ok
+
+        {:ok, response} ->
+          {:error, classify(response)}
+
+        {:error, {:transport, reason}} ->
+          {:unknown,
+           write_lost_hint(reason, [
+             {:voucher, voucher.external_voucher_number},
+             {:external_reference, voucher.external_reference}
+           ])}
+      end
+    end
+  end
+
+  @impl true
+  def get_voucher_attachment(context, voucher_ref) do
+    with {:ok, %Voucher{} = voucher} <- resolve_finance_voucher(context, voucher_ref) do
+      case Client.get(context, attachment_metadata_path(voucher)) do
+        {:ok, %{status: 404}} ->
+          {:ok, nil}
+
+        {:ok, %{status: status, body: body}} when status in 200..299 ->
+          fetch_attachment_evidence(context, voucher, body)
+
+        {:ok, response} ->
+          {:error, classify(response)}
+
+        {:error, {:transport, reason}} ->
+          {:error, {:provider_failure, reason}}
+      end
+    end
+  end
+
+  defp resolve_finance_voucher(context, {:voucher, _number} = ref),
+    do: require_finance_voucher(get_finance_voucher(context, ref), ref)
+
+  defp resolve_finance_voucher(context, {:external_reference, _reference} = ref),
+    do: require_finance_voucher(get_finance_voucher(context, ref), ref)
+
+  defp require_finance_voucher({:ok, nil}, ref), do: {:error, {:not_found, ref}}
+  defp require_finance_voucher(result, _ref), do: result
+
+  defp fetch_finance_voucher(context, journal, year, number) do
+    case Client.get(context, "/journals/#{journal}/vouchers/#{year}-#{number}") do
+      {:ok, %{status: 404}} ->
+        {:ok, nil}
+
+      {:ok, %{status: status, body: body}} when status in 200..299 ->
+        case normalize_finance_voucher(body, finance_voucher_defaults(context, nil)) do
+          {:ok, voucher} -> {:ok, voucher}
+          :unknown -> {:error, {:provider_failure, "voucher read lacked required fields"}}
+        end
+
+      {:ok, response} ->
+        {:error, classify(response)}
+
+      {:error, {:transport, reason}} ->
+        {:error, {:provider_failure, reason}}
+    end
+  end
+
+  defp finance_voucher_body(%FinanceVoucher{} = voucher) do
+    %{
+      "accountingYear" => %{"year" => numberish(voucher.accounting_year_external_id)},
+      "entries" => %{
+        "financeVouchers" => Enum.map(voucher.lines, &finance_voucher_line_body(&1, voucher))
+      }
+    }
+  end
+
+  defp finance_voucher_line_body(%FinanceVoucherLine{} = line, voucher) do
+    %{
+      "account" => %{"accountNumber" => numberish(line.account_external_id)},
+      "amount" => voucher_amount(line.amount),
+      "date" => Date.to_iso8601(voucher.accounting_date),
+      "text" => voucher_entry_text(voucher.external_reference, line),
+      "currency" => %{"code" => voucher.currency}
+    }
+  end
+
+  defp voucher_amount(%Money{} = money) do
+    money
+    |> Money.to_major_decimal()
+    |> Decimal.round(Money.exponent(money.currency))
+    |> Decimal.to_string(:normal)
+    |> Jason.Fragment.new()
+  end
+
+  defp finance_journal(context) do
+    Map.get(context, :journal_external_id) ||
+      get_in(context, [:mappings, :credit_close_journal_external_id])
+  end
+
+  defp finance_accounting_year(context) do
+    Map.get(context, :accounting_year_external_id) ||
+      get_in(context, [:mappings, :credit_close_accounting_year_external_id])
+  end
+
+  defp finance_voucher_defaults(context, reference) do
+    currency = Map.get(context, :currency, "DKK")
+
+    liability_account =
+      Map.get(context, :credit_liability_account_external_id) ||
+        get_in(context, [:mappings, :credit_liability_account_external_id])
+
+    expected_lines =
+      if is_binary(liability_account) and liability_account != "" do
+        [
+          %FinanceVoucherLine{
+            line_key: "customer-credit-liability",
+            account_external_id: liability_account,
+            amount: Money.zero(currency),
+            role: :customer_credit_liability
+          }
+        ]
+      else
+        []
+      end
+
+    %FinanceVoucher{
+      external_reference: reference || "unknown",
+      accounting_date: Map.get(context, :accounting_date, Date.utc_today()),
+      accounting_year_external_id: stringify(finance_accounting_year(context) || "unknown"),
+      journal_external_id: stringify(finance_journal(context) || "unknown"),
+      currency: currency,
+      lines: expected_lines
+    }
+  end
+
+  defp normalize_finance_voucher(body, %FinanceVoucher{} = defaults) when is_map(body) do
+    number = stringify(body["voucherNumber"] || body["number"])
+
+    if is_nil(number) do
+      :unknown
+    else
+      entries = get_in(body, ["entries", "financeVouchers"]) || body["financeVouchers"] || []
+
+      with {:ok, date} <- voucher_date(body, defaults.accounting_date),
+           {:ok, lines} <- normalize_voucher_lines(entries, defaults) do
+        voucher = %Voucher{
+          external_voucher_number: number,
+          external_reference: voucher_reference(body, defaults.external_reference),
+          accounting_date: date,
+          accounting_year_external_id:
+            stringify(
+              get_in(body, ["accountingYear", "year"]) || defaults.accounting_year_external_id
+            ),
+          journal_external_id:
+            stringify(get_in(body, ["journal", "journalNumber"]) || defaults.journal_external_id),
+          currency: currency_code(body["currency"]) || defaults.currency,
+          lines: lines,
+          provider_extras: %{}
+        }
+
+        {:ok, %{voucher | external_hash: BillingCore.Domain.Canonical.hash(voucher)}}
+      else
+        _error -> :unknown
+      end
+    end
+  end
+
+  defp normalize_voucher_lines(lines, %FinanceVoucher{} = defaults) when is_list(lines) do
+    lines
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {line, index}, {:ok, acc} ->
+      account = get_in(line, ["account", "accountNumber"]) || line["accountNumber"]
+      amount = line["amount"]
+
+      with account when not is_nil(account) <- account,
+           {:ok, money} <- voucher_money(amount, defaults.currency) do
+        normalized = %FinanceVoucherLine{
+          line_key: stringify(line["lineNumber"] || index + 1),
+          account_external_id: stringify(account),
+          amount: money,
+          role: expected_line_role(defaults.lines, stringify(account)),
+          description: line["text"]
+        }
+
+        {:cont, {:ok, acc ++ [normalized]}}
+      else
+        _error -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp normalize_voucher_lines(_lines, _defaults), do: :error
+
+  defp voucher_money(%Decimal{} = amount, currency) do
+    multiplier = Decimal.new(Integer.pow(10, Money.exponent(currency)))
+    minor = Decimal.mult(amount, multiplier)
+
+    if Decimal.equal?(minor, Decimal.round(minor, 0)) do
+      {:ok, Money.new!(currency, Decimal.to_integer(minor))}
+    else
+      :error
+    end
+  end
+
+  defp voucher_money(amount, currency) when is_integer(amount),
+    do: voucher_money(Decimal.new(amount), currency)
+
+  defp voucher_money(amount, currency) when is_binary(amount),
+    do: voucher_money(Decimal.new(amount), currency)
+
+  defp voucher_money(_amount, _currency), do: :error
+
+  defp voucher_date(body, fallback) do
+    case parse_date(body["date"]) || fallback do
+      %Date{} = date -> {:ok, date}
+      _other -> :error
+    end
+  end
+
+  defp voucher_reference(body, fallback) do
+    body["text"] || get_in(body, ["entries", "financeVouchers", Access.at(0), "text"]) || fallback
+  end
+
+  defp expected_line_role(lines, account_external_id) do
+    case Enum.find(lines, &(&1.account_external_id == account_external_id)) do
+      %FinanceVoucherLine{role: role} -> role
+      nil -> :balancing
+    end
+  end
+
+  # The sole liability line carries the exact stable reference so provider
+  # equality filters can recover an unknown write. Aggregate balancing lines
+  # may add human context, but keep the same reference prefix.
+  defp voucher_entry_text(reference, %FinanceVoucherLine{
+         role: :customer_credit_liability
+       }),
+       do: reference
+
+  defp voucher_entry_text(reference, %FinanceVoucherLine{description: nil}), do: reference
+
+  defp voucher_entry_text(reference, %FinanceVoucherLine{description: description}) do
+    # e-conomic caps entry text. The recovery reference is always first and is
+    # never truncated by an optional aggregate description.
+    String.slice(reference <> " | " <> description, 0, 250)
+  end
+
+  defp currency_code(%{"code" => code}) when is_binary(code), do: code
+  defp currency_code(code) when is_binary(code), do: code
+  defp currency_code(_other), do: nil
+
+  defp attachment_metadata_path(%Voucher{} = voucher) do
+    "/journals/#{voucher.journal_external_id}/vouchers/#{voucher.accounting_year_external_id}-#{voucher.external_voucher_number}/attachment"
+  end
+
+  defp attachment_file_path(%Voucher{} = voucher),
+    do: attachment_metadata_path(voucher) <> "/file"
+
+  defp fetch_attachment_evidence(context, voucher, metadata) do
+    case Client.get(context, attachment_file_path(voucher)) do
+      {:ok, %{status: status, body: content, headers: headers}}
+      when status in 200..299 and is_binary(content) ->
+        {:ok, normalize_attachment(metadata, content, headers)}
+
+      {:ok, response} ->
+        {:error, classify(response)}
+
+      {:error, {:transport, reason}} ->
+        {:error, {:provider_failure, reason}}
+    end
+  end
+
+  defp normalize_attachment(body, content, headers) when is_map(body) and is_binary(content) do
+    %AttachmentEvidence{
+      filename: body["fileName"] || body["name"] || "voucher-report.pdf",
+      content_type: attachment_content_type(headers),
+      sha256: :crypto.hash(:sha256, content) |> Base.encode16(case: :lower),
+      byte_size: byte_size(content),
+      external_attachment_id: stringify(body["attachmentNumber"] || body["id"])
+    }
+  end
+
+  defp attachment_content_type(headers) do
+    headers
+    |> Map.get("content-type", [])
+    |> List.first()
+    |> case do
+      value when is_binary(value) -> value
+      _other -> "application/pdf"
     end
   end
 

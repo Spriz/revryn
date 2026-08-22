@@ -12,6 +12,23 @@ defmodule BillingCore.Release do
 
   @app :billing_core
 
+  @doc """
+  Resolves a deployment secret for `config/runtime.exs`: the environment
+  variable `name` directly, or — per the container/systemd convention —
+  the contents of the file whose path is in `<name>_FILE` (Kubernetes and
+  Docker secret mounts, systemd `LoadCredential`). The file form keeps the
+  value out of the process environment table. Returns `nil` when neither
+  is set; a set variable wins over the `_FILE` indirection.
+  """
+  @spec read_secret(String.t()) :: String.t() | nil
+  def read_secret(name) do
+    case {System.get_env(name), System.get_env(name <> "_FILE")} do
+      {value, _} when is_binary(value) -> value
+      {nil, path} when is_binary(path) -> path |> File.read!() |> String.trim_trailing("\n")
+      {nil, nil} -> nil
+    end
+  end
+
   def migrate do
     load_app()
 
@@ -27,15 +44,7 @@ defmodule BillingCore.Release do
 
   @doc "Runs redacted diagnostics; exits non-zero when a required check fails."
   def doctor(format \\ :text) do
-    load_app()
-
-    checks =
-      [
-        check_database(),
-        check_migrations(),
-        check_secret_key_base(),
-        check_clock()
-      ]
+    checks = checks()
 
     case format do
       :json ->
@@ -64,6 +73,80 @@ defmodule BillingCore.Release do
   rescue
     error ->
       %{name: "database", status: :fail, detail: redact(Exception.message(error))}
+  end
+
+  @doc """
+  The redacted diagnostic checks behind `doctor/1` (BC-TASK-095): database,
+  migrations, configuration, mail transport, queue health, and clock —
+  each answerable without SQL or IEx access.
+  """
+  @spec checks() :: [map()]
+  def checks do
+    load_app()
+
+    [
+      check_database(),
+      check_migrations(),
+      check_secret_key_base(),
+      check_smtp(),
+      check_queues(),
+      check_clock()
+    ]
+  end
+
+  defp check_smtp do
+    config = Application.get_env(@app, BillingCore.Mailer, [])
+
+    case Keyword.get(config, :adapter) do
+      Swoosh.Adapters.SMTP ->
+        missing =
+          Enum.filter([:relay, :port], fn key ->
+            value = Keyword.get(config, key)
+            is_nil(value) or value == ""
+          end)
+
+        if missing == [] do
+          %{name: "smtp", status: :pass, detail: "SMTP transport configured"}
+        else
+          %{name: "smtp", status: :fail, detail: "missing #{Enum.join(missing, ", ")}"}
+        end
+
+      nil ->
+        %{name: "smtp", status: :warn, detail: "no mailer adapter configured"}
+
+      adapter ->
+        %{
+          name: "smtp",
+          status: :warn,
+          detail: "non-SMTP adapter #{inspect(adapter)} (mail stays local)"
+        }
+    end
+  end
+
+  # Queue health without SQL: per-state Oban job counts. Retryable or
+  # discarded work is the "look at the operations inbox / logs" signal.
+  defp check_queues do
+    case Ecto.Migrator.with_repo(BillingCore.Repo, fn repo ->
+           repo.query!(
+             "SELECT state, count(*) FROM public.oban_jobs GROUP BY state ORDER BY state",
+             []
+           ).rows
+         end) do
+      {:ok, rows, _} ->
+        counts = Map.new(rows, fn [state, count] -> {state, count} end)
+        discarded = Map.get(counts, "discarded", 0)
+        retryable = Map.get(counts, "retryable", 0)
+
+        detail =
+          if counts == %{},
+            do: "queues empty",
+            else: Enum.map_join(counts, ", ", fn {s, c} -> "#{s}=#{c}" end)
+
+        status = if discarded > 0 or retryable > 0, do: :warn, else: :pass
+        %{name: "queues", status: status, detail: detail}
+    end
+  rescue
+    error -> %{name: "queues", status: :fail, detail: redact(Exception.message(error))}
   end
 
   defp check_migrations do

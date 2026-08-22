@@ -21,6 +21,7 @@ defmodule BillingCore.Application do
     children = [
       BillingCoreWeb.Telemetry,
       BillingCore.Repo,
+      BillingCore.ERP.FakeERP.InstanceSupervisor,
       {DNSCluster, query: Application.get_env(:billing_core, :dns_cluster_query) || :ignore},
       {Oban, Application.fetch_env!(:billing_core, Oban)},
       {Phoenix.PubSub, name: BillingCore.PubSub},

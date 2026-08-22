@@ -1,0 +1,65 @@
+---
+import { getCollection } from "astro:content";
+import Base from "../../layouts/Base.astro";
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+const features = (await getCollection("features", (e) => e.data.public)).sort(
+  (a, b) => a.data.title.localeCompare(b.data.title),
+);
+
+function excerpt(body: string | undefined): string {
+  if (!body) return "";
+  const paras = body
+    .replace(/^---[\s\S]*?---/, "")
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter((p) => p && !p.startsWith("#"));
+  return (paras[0] ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/[*_`\[\]]/g, "")
+    .slice(0, 180);
+}
+---
+
+<Base
+  title="Features — Revryn"
+  description="Canonical feature documentation for the Revryn billing core, generated from the repository's docs/features/ source of truth."
+>
+  <section class="wrap">
+    <p class="eyebrow">Documentation</p>
+    <h1>Features</h1>
+    <p class="lede">
+      These pages are generated from <code>docs/features/</code> in the
+      repository — the product source of truth. Behavior-changing pull
+      requests update the relevant document in the same change, and each
+      document links the workflow tests that prove it.
+    </p>
+    <div class="card-grid">
+      {features.map((f) => (
+        <a class="card" href={`${base}/features/${f.id}/`}>
+          <h3>
+            {f.data.title}
+            <span class={`badge ${f.data.status}`}>{f.data.status}</span>
+          </h3>
+          <p>{excerpt(f.body)}…</p>
+        </a>
+      ))}
+    </div>
+  </section>
+</Base>
+
+<style>
+  section {
+    padding: 4rem 0;
+  }
+  h1 {
+    font-size: 2.4rem;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.75rem;
+  }
+  .lede {
+    color: var(--text-dim);
+    max-width: 44rem;
+    margin-bottom: 2.5rem;
+  }
+</style>
