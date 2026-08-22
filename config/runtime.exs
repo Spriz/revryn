@@ -82,6 +82,16 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
 
+  # Generated absolute URLs (invitation links, mail, ~p) default to
+  # https://host; deployments serving plain HTTP or a nonstandard public
+  # port (labs, e2e, reverse-proxy edge cases) override these two.
+  url_scheme = System.get_env("PHX_URL_SCHEME") || "https"
+
+  url_port =
+    String.to_integer(
+      System.get_env("PHX_URL_PORT") || if(url_scheme == "https", do: "443", else: "80")
+    )
+
   config :billing_core, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   # Websocket/LiveView origin allow-list. Unset keeps the framework default
@@ -96,7 +106,7 @@ if config_env() == :prod do
     end
 
   config :billing_core, BillingCoreWeb.Endpoint,
-    url: [host: host, port: 443, scheme: "https"],
+    url: [host: host, port: url_port, scheme: url_scheme],
     check_origin: check_origin,
     http: [
       # Enable IPv6 and bind on all interfaces.

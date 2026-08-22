@@ -22,6 +22,7 @@ Optional / situational:
 | Variable | Meaning |
 |----------|---------|
 | `PORT` | HTTP port (default 4000). |
+| `PHX_URL_SCHEME` / `PHX_URL_PORT` | Scheme/port for *generated* absolute URLs (invitation links, mail). Default `https`/443 — override only when the public origin is plain HTTP or a nonstandard port. |
 | `POOL_SIZE` | Database pool size. |
 | `WEBAUTHN_ORIGIN` | Exact browser origin for passkeys (default `https://$PHX_HOST`). Must match scheme+host+port the user's browser sees, or registration/sign-in fails attestation. |
 | `WEBAUTHN_RP_ID` | Relying-party ID (default `$PHX_HOST`). |

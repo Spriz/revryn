@@ -97,6 +97,10 @@ jobs:
       DATABASE_URL: ecto://postgres:postgres@127.0.0.1:55432/billing_core_release_e2e
       PHX_HOST: localhost
       PORT: "4000"
+      # Generated absolute URLs (e.g. invitation links) must be reachable
+      # by the browser in this plain-HTTP environment.
+      PHX_URL_SCHEME: http
+      PHX_URL_PORT: "4000"
       PHX_CHECK_ORIGIN: http://localhost:4000
       REVRYN_DEMO_ERP_ENABLED: "true"
       WEBAUTHN_RP_ID: localhost
