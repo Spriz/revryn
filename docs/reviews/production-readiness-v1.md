@@ -1,7 +1,11 @@
 # Production-readiness review v1 — evidence matrix
 
-Status: **NO-GO** (open gates listed below)
-Date: 2026-08-22 (rev 6, same day) · Reviewed state: `main` pushed to
+Status: **NO-GO** — three open gates remain (sandbox certification,
+accountant sign-off, usability evidence); two gates were closed and two
+deferred by owner decision on 2026-08-22 (rev 7): the signed CLI release
+shipped and verified (`cli/v0.1.0`), the independent security review and
+the full-scale capacity rerun are consciously postponed (see items 4/7).
+Date: 2026-08-22 (rev 7) · Reviewed state: `main` pushed to
 github.com/Spriz/revryn — **remote CI fully green** (run 32588941571: all
 8 jobs — test+credo+dialyzer, Go CLI, 3 standalone showcases, fnox
 config, official image with backup/restore, release-mode Playwright with
@@ -63,9 +67,13 @@ turnkey (the engineering side is prepared):**
 3. **Qualitative activation evidence.** One action: run 2–4 sessions per
    `docs/reviews/usability-protocol.md` (script, pass signals, evidence
    format); telemetry is already in place. Owner: user.
-4. **Independent security review.** One action: hand
-   `docs/reviews/security-review-scoping.md` (entry points, crown jewels,
-   prior work, run instructions) to the reviewer. Owner: user.
+4. **Independent security review — DEFERRED by owner decision
+   (2026-08-22).** The owner chose to skip the external review for now;
+   the diff-scoped self-review (`security-review-2026-08-22.md`) and the
+   prepared scoping pack (`security-review-scoping.md`) stand ready for
+   when it is commissioned. Risk accepted by: user. Revisit before
+   exposing the deployment to untrusted tenants or the public internet
+   at scale.
 
 **Implementable, not yet done (tracked with next actions in `TODO.md`):**
 
@@ -74,14 +82,19 @@ turnkey (the engineering side is prepared):**
    intent to `erp_draft` against the fake adapter, and the Laravel run
    additionally certifies annual service-period propagation (365-day
    frozen line). PHP was unblocked without sudo via a source-built libgd.
-6. ~~Signed CLI release artifacts/SBOM~~ — resolved:
-   `release-revryn.yml` builds the full matrix with checksums, SPDX
-   SBOM, and keyless Sigstore signatures (GitHub OIDC — no signing secret
-   needed); awaiting only the first `cli/vX.Y.Z` tag push.
-   Owner: user (one tag).
-7. Full-scale §21.2 capacity rerun — turnkey: `CAPACITY_SCALE=100
-   mix test --only performance` on production-like hardware
-   (`capacity-v1.md`). Owner: user (environment).
+6. ~~Signed CLI release artifacts/SBOM~~ — **CLOSED (2026-08-22)**: the
+   user pushed `cli/v0.1.0`; the release workflow succeeded on its first
+   run, publishing the 5-target `revryn` binary matrix, SHA256SUMS, SPDX
+   SBOM, Sigstore bundles, and VERIFY.md. Independently verified:
+   checksum match plus `cosign verify-blob` against the repository's
+   GitHub OIDC identity → "Verified OK".
+7. Full-scale §21.2 capacity rerun — **DEFERRED by owner decision
+   (2026-08-22) until proof-of-concept / product-market fit.** The
+   dev-machine baseline passed every §21.1 objective with 28×–300×
+   headroom (`capacity-v1.md`), which the owner accepts as sufficient
+   for the current stage. Turnkey when revisited: `CAPACITY_SCALE=100
+   mix test --only performance` on production-like hardware. Risk
+   accepted by: user.
 8. ~~Flat-fee plan-component shape~~ — resolved: minimum-commit over a
    zero-rate inner is the contract's native flat fee; the CRM integration
    is recertified fully platform-priced, and the exercise fixed a real
