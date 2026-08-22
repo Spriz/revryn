@@ -29,8 +29,7 @@ defmodule BillingCore.ERP.FakeERP.InstanceSupervisorTest do
     ref = Process.monitor(pid_a)
     assert :ok = InstanceSupervisor.stop(connection_a)
     assert_receive {:DOWN, ^ref, :process, ^pid_a, :shutdown}
-    _ = :sys.get_state(BillingCore.ERP.FakeERP.InstanceSupervisor.Registry)
-    assert {:error, :not_found} = InstanceSupervisor.fetch(connection_a)
+    await_unregistered(connection_a)
     assert {:ok, ^pid_b} = InstanceSupervisor.fetch(connection_b)
   end
 
@@ -61,8 +60,7 @@ defmodule BillingCore.ERP.FakeERP.InstanceSupervisorTest do
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
     assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
-    _ = :sys.get_state(BillingCore.ERP.FakeERP.InstanceSupervisor.Registry)
-    assert {:error, :not_found} = InstanceSupervisor.fetch(connection_id)
+    await_unregistered(connection_id)
 
     newer = snapshot_with_reference("newer-ref", initial)
     assert {:ok, rehydrated} = InstanceSupervisor.ensure_started(connection_id, snapshot: newer)
@@ -99,6 +97,24 @@ defmodule BillingCore.ERP.FakeERP.InstanceSupervisorTest do
     assert {:ok, _document} = FakeERP.create_draft(context, invoice, "snapshot:#{reference}")
     assert {:ok, exported} = FakeERP.export_snapshot(server)
     exported
+  end
+
+  # Registry key cleanup is asynchronous even after the instance's DOWN is
+  # observed: the registry partition that monitored the process removes the
+  # key in its own time, and `:sys.get_state` on the registry name does not
+  # synchronize with that partition. Poll briefly instead.
+  defp await_unregistered(connection_id, attempts \\ 100) do
+    case InstanceSupervisor.fetch(connection_id) do
+      {:error, :not_found} ->
+        :ok
+
+      {:ok, _pid} when attempts > 0 ->
+        Process.sleep(10)
+        await_unregistered(connection_id, attempts - 1)
+
+      {:ok, pid} ->
+        flunk("instance #{inspect(pid)} is still registered for #{connection_id}")
+    end
   end
 
   defp stop_if_running(connection_id) do
