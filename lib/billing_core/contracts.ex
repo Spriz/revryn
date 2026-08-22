@@ -364,137 +364,7 @@ defmodule BillingCore.Contracts do
     with :ok <- authorize(scope, @write_roles) do
       team_id = Scope.team_id!(scope)
 
-      Repo.transaction(fn ->
-        contract =
-          case fetch_team_row(Contract, team_id, attrs[:contract_id]) do
-            {:ok, contract} -> contract
-            {:error, :not_found} -> Repo.rollback(:contract_not_found)
-          end
-
-        time_zone = attrs[:time_zone] || team_time_zone(scope)
-        policy = attrs[:cancellation_policy] || "end_of_period"
-        overrides = attrs[:price_overrides] || %{}
-        quantity = to_decimal(attrs[:quantity])
-
-        base_changeset =
-          Subscription.create_changeset(
-            %Subscription{
-              team_id: team_id,
-              contract_id: contract.id,
-              current_version: 1,
-              version: 1
-            },
-            %{
-              external_id: attrs[:external_id],
-              start_date: attrs[:start_date],
-              end_date_exclusive: attrs[:end_date_exclusive],
-              billing_anchor_day: attrs[:billing_anchor_day],
-              time_zone: time_zone
-            }
-          )
-
-        case Ecto.Changeset.apply_action(base_changeset, :insert) do
-          {:ok, _} -> :ok
-          {:error, changeset} -> Repo.rollback(changeset)
-        end
-
-        external_id = Ecto.Changeset.get_field(base_changeset, :external_id)
-        start_date = Ecto.Changeset.get_field(base_changeset, :start_date)
-        end_date = Ecto.Changeset.get_field(base_changeset, :end_date_exclusive)
-
-        anchor =
-          Ecto.Changeset.get_field(base_changeset, :billing_anchor_day) || start_date.day
-
-        payload =
-          stored_payload(%{
-            "external_id" => external_id,
-            "contract_id" => contract.id,
-            "plan_version_id" => attrs[:plan_version_id],
-            "quantity" => quantity,
-            "start_date" => start_date,
-            "end_date_exclusive" => end_date,
-            "billing_anchor_day" => anchor,
-            "time_zone" => time_zone,
-            "price_overrides" => overrides,
-            "cancellation_policy" => policy
-          })
-
-        case Repo.get_by(Subscription, team_id: team_id, external_id: external_id) do
-          %Subscription{} = existing ->
-            original =
-              Repo.get_by(SubscriptionChange,
-                team_id: team_id,
-                subscription_id: existing.id,
-                change_type: :start
-              )
-
-            if original && Canonical.hash(original.payload) == Canonical.hash(payload) do
-              existing
-            else
-              Repo.rollback(:conflict)
-            end
-
-          nil ->
-            unless inside_contract?(contract, start_date, end_date) do
-              Repo.rollback(:outside_contract_period)
-            end
-
-            status =
-              if Date.after?(start_date, local_today(time_zone)), do: :scheduled, else: :active
-
-            subscription =
-              base_changeset
-              |> Ecto.Changeset.put_change(:status, status)
-              |> Ecto.Changeset.put_change(:billing_anchor_day, anchor)
-              |> Repo.insert!()
-
-            insert_subscription_version!(subscription, 1, %{
-              plan_version_id: attrs[:plan_version_id],
-              quantity: attrs[:quantity],
-              effective_start: start_date,
-              effective_end_exclusive: end_date,
-              price_overrides: overrides,
-              cancellation_policy: policy
-            })
-
-            Repo.insert!(%SubscriptionChange{
-              team_id: team_id,
-              subscription_id: subscription.id,
-              change_type: :start,
-              effective_date: start_date,
-              idempotency_key: attrs[:idempotency_key] || "start:#{external_id}",
-              actor_reference: actor_reference(scope),
-              payload: payload,
-              result: %{
-                "subscription_id" => subscription.id,
-                "status" => to_string(status),
-                "version" => 1
-              }
-            })
-
-            Audit.record!(scope, "contracts.subscription.started",
-              aggregate: {"subscription", subscription.id},
-              payload: %{external_id: external_id, status: status, contract_id: contract.id}
-            )
-
-            Outbox.emit!("subscription.started.v1",
-              aggregate: {"subscription", subscription.id},
-              team_id: team_id,
-              aggregate_version: 1,
-              correlation_id: scope.correlation_id,
-              payload: %{
-                external_id: external_id,
-                contract_id: contract.id,
-                plan_version_id: attrs[:plan_version_id],
-                quantity: quantity && Canonical.decimal_string(quantity),
-                start_date: Date.to_iso8601(start_date),
-                status: status
-              }
-            )
-
-            subscription
-        end
-      end)
+      Repo.transaction(fn -> start_subscription_in_txn(scope, team_id, attrs) end)
     end
   end
 
@@ -650,137 +520,7 @@ defmodule BillingCore.Contracts do
     with :ok <- authorize(scope, @write_roles) do
       team_id = Scope.team_id!(scope)
 
-      Repo.transaction(fn ->
-        sub =
-          lock_subscription(team_id, subscription.id) || Repo.rollback(:subscription_not_found)
-
-        mode = attrs[:mode]
-
-        unless mode in [:immediate, :end_of_period], do: Repo.rollback(:invalid_mode)
-
-        reason = attrs[:reason]
-        current = current_version!(sub)
-
-        {event, effective_date} =
-          case mode do
-            :immediate ->
-              {:cancel, resolve_effective_date(attrs[:effective_date], sub.time_zone)}
-
-            :end_of_period ->
-              case attrs[:period_end_date] do
-                %Date{} = period_end -> {:cancel_at_period_end, period_end}
-                _missing -> Repo.rollback(:missing_period_end_date)
-              end
-          end
-
-        payload =
-          stored_payload(%{
-            "change_type" => "cancel",
-            "mode" => mode,
-            "effective_date" => effective_date,
-            "reason" => reason
-          })
-
-        key = attrs[:idempotency_key] || Ecto.UUID.generate()
-
-        case replayed_change(team_id, sub.id, key) do
-          %SubscriptionChange{} = original ->
-            replay_or_conflict(original, payload, sub)
-
-          nil ->
-            next_status =
-              case StateMachine.transition(@subscription_machine, sub.status, event) do
-                {:ok, next_status} -> next_status
-                {:error, _} -> Repo.rollback(:invalid_state)
-              end
-
-            version_end =
-              cond do
-                sub.status == :scheduled ->
-                  # Cancelled before start: the version never becomes effective.
-                  current.effective_start
-
-                Date.before?(effective_date, current.effective_start) ->
-                  Repo.rollback(:effective_date_in_past)
-
-                current.effective_end_exclusive != nil and
-                    Date.after?(effective_date, current.effective_end_exclusive) ->
-                  Repo.rollback(:effective_date_after_end)
-
-                true ->
-                  effective_date
-              end
-
-            current
-            |> Ecto.Changeset.change(effective_end_exclusive: version_end, status_reason: reason)
-            |> Repo.update!()
-
-            end_date_exclusive =
-              if sub.status == :scheduled do
-                nil
-              else
-                unless Date.after?(effective_date, sub.start_date) do
-                  Repo.rollback(:effective_date_in_past)
-                end
-
-                effective_date
-              end
-
-            updated =
-              sub
-              |> Ecto.Changeset.change(
-                status: next_status,
-                end_date_exclusive: end_date_exclusive,
-                version: sub.version + 1
-              )
-              |> Repo.update!()
-
-            Repo.insert!(%SubscriptionChange{
-              team_id: team_id,
-              subscription_id: sub.id,
-              change_type: :cancel,
-              effective_date: effective_date,
-              idempotency_key: key,
-              actor_reference: actor_reference(scope),
-              payload: payload,
-              result: %{"status" => to_string(next_status)}
-            })
-
-            Audit.record!(scope, "contracts.subscription.cancelled",
-              aggregate: {"subscription", sub.id},
-              payload: %{
-                mode: mode,
-                effective_date: Date.to_iso8601(effective_date),
-                reason: reason,
-                status: next_status
-              }
-            )
-
-            Outbox.emit!("subscription.cancelled.v1",
-              aggregate: {"subscription", sub.id},
-              team_id: team_id,
-              aggregate_version: sub.current_version,
-              correlation_id: scope.correlation_id,
-              payload: %{
-                external_id: sub.external_id,
-                mode: mode,
-                effective_date: Date.to_iso8601(effective_date),
-                reason: reason,
-                status: next_status
-              }
-            )
-
-            # BC-US-109: an immediate cancellation durably triggers the
-            # remaining-credit disposition evaluation for the customer.
-            if next_status == :cancelled do
-              %{subscription_id: sub.id}
-              |> BillingCore.Credits.TerminationDispositionWorker.new()
-              |> Oban.insert!()
-            end
-
-            updated
-        end
-      end)
+      Repo.transaction(fn -> cancel_subscription_in_txn(scope, team_id, subscription, attrs) end)
     end
   end
 
@@ -862,111 +602,7 @@ defmodule BillingCore.Contracts do
     with :ok <- authorize(scope, @write_roles) do
       team_id = Scope.team_id!(scope)
 
-      Repo.transaction(fn ->
-        contract =
-          case fetch_team_row(Contract, team_id, attrs[:contract_id]) do
-            {:ok, contract} -> contract
-            {:error, :not_found} -> Repo.rollback(:contract_not_found)
-          end
-
-        subscription_id = resolve_charge_subscription(team_id, contract, attrs[:subscription_id])
-        {price_component_id, amount_minor, quantity} = resolve_pricing_source(attrs)
-
-        currency =
-          case attrs[:currency] do
-            nil -> contract.currency
-            currency when currency == contract.currency -> currency
-            _mismatch -> Repo.rollback(:currency_mismatch)
-          end
-
-        payload = %{
-          "external_id" => attrs[:external_id],
-          "contract_id" => contract.id,
-          "subscription_id" => subscription_id,
-          "product_id" => attrs[:product_id],
-          "product_version" => attrs[:product_version],
-          "price_component_id" => price_component_id,
-          "amount_minor" => amount_minor,
-          "quantity" => quantity,
-          "currency" => currency,
-          "eligible_on" => attrs[:eligible_on],
-          "recognition_mode" => attrs[:recognition_mode],
-          "service_start" => attrs[:service_start],
-          "service_end_exclusive" => attrs[:service_end_exclusive]
-        }
-
-        payload_hash = Canonical.hash(payload)
-
-        existing =
-          if is_binary(attrs[:external_id]) do
-            Repo.get_by(ChargeInstance, team_id: team_id, external_id: attrs[:external_id])
-          end
-
-        case existing do
-          %ChargeInstance{} = original ->
-            if original.payload_hash == payload_hash do
-              original
-            else
-              Repo.rollback(:conflict)
-            end
-
-          nil ->
-            changeset =
-              ChargeInstance.create_changeset(
-                %ChargeInstance{
-                  team_id: team_id,
-                  contract_id: contract.id,
-                  subscription_id: subscription_id,
-                  status: :pending,
-                  canonical_payload: stored_payload(payload),
-                  payload_hash: payload_hash
-                },
-                %{
-                  external_id: attrs[:external_id],
-                  product_id: attrs[:product_id],
-                  product_version: attrs[:product_version],
-                  price_component_id: price_component_id,
-                  eligible_on: attrs[:eligible_on],
-                  quantity: quantity,
-                  amount_minor: amount_minor,
-                  currency: currency,
-                  recognition_mode: attrs[:recognition_mode],
-                  service_start: attrs[:service_start],
-                  service_end_exclusive: attrs[:service_end_exclusive]
-                }
-              )
-
-            charge =
-              case Repo.insert(changeset) do
-                {:ok, charge} -> charge
-                {:error, changeset} -> Repo.rollback(changeset)
-              end
-
-            Audit.record!(scope, "contracts.charge_instance.created",
-              aggregate: {"charge_instance", charge.id},
-              payload: %{
-                external_id: charge.external_id,
-                contract_id: contract.id,
-                payload_hash: payload_hash
-              }
-            )
-
-            Outbox.emit!("charge_instance.created.v1",
-              aggregate: {"charge_instance", charge.id},
-              team_id: team_id,
-              correlation_id: scope.correlation_id,
-              payload: %{
-                external_id: charge.external_id,
-                contract_id: contract.id,
-                subscription_id: subscription_id,
-                eligible_on: to_string(charge.eligible_on),
-                recognition_mode: charge.recognition_mode
-              }
-            )
-
-            charge
-        end
-      end)
+      Repo.transaction(fn -> create_charge_instance_in_txn(scope, team_id, attrs) end)
     end
   end
 
@@ -1145,193 +781,545 @@ defmodule BillingCore.Contracts do
 
   ## Subscription internals
 
+  defp start_subscription_in_txn(scope, team_id, attrs) do
+    contract = fetch_contract!(team_id, attrs[:contract_id])
+
+    time_zone = attrs[:time_zone] || team_time_zone(scope)
+    policy = attrs[:cancellation_policy] || "end_of_period"
+    overrides = attrs[:price_overrides] || %{}
+    quantity = to_decimal(attrs[:quantity])
+
+    base_changeset = validated_start_changeset(team_id, contract, attrs, time_zone)
+
+    external_id = Ecto.Changeset.get_field(base_changeset, :external_id)
+    start_date = Ecto.Changeset.get_field(base_changeset, :start_date)
+    end_date = Ecto.Changeset.get_field(base_changeset, :end_date_exclusive)
+
+    anchor =
+      Ecto.Changeset.get_field(base_changeset, :billing_anchor_day) || start_date.day
+
+    payload =
+      stored_payload(%{
+        "external_id" => external_id,
+        "contract_id" => contract.id,
+        "plan_version_id" => attrs[:plan_version_id],
+        "quantity" => quantity,
+        "start_date" => start_date,
+        "end_date_exclusive" => end_date,
+        "billing_anchor_day" => anchor,
+        "time_zone" => time_zone,
+        "price_overrides" => overrides,
+        "cancellation_policy" => policy
+      })
+
+    start = %{
+      contract: contract,
+      base_changeset: base_changeset,
+      external_id: external_id,
+      start_date: start_date,
+      end_date: end_date,
+      anchor: anchor,
+      time_zone: time_zone,
+      policy: policy,
+      overrides: overrides,
+      quantity: quantity,
+      payload: payload
+    }
+
+    case Repo.get_by(Subscription, team_id: team_id, external_id: external_id) do
+      %Subscription{} = existing -> replay_started_subscription(team_id, existing, payload)
+      nil -> insert_started_subscription(scope, team_id, attrs, start)
+    end
+  end
+
+  defp validated_start_changeset(team_id, contract, attrs, time_zone) do
+    base_changeset =
+      Subscription.create_changeset(
+        %Subscription{
+          team_id: team_id,
+          contract_id: contract.id,
+          current_version: 1,
+          version: 1
+        },
+        %{
+          external_id: attrs[:external_id],
+          start_date: attrs[:start_date],
+          end_date_exclusive: attrs[:end_date_exclusive],
+          billing_anchor_day: attrs[:billing_anchor_day],
+          time_zone: time_zone
+        }
+      )
+
+    case Ecto.Changeset.apply_action(base_changeset, :insert) do
+      {:ok, _} -> base_changeset
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
+  end
+
+  defp replay_started_subscription(team_id, existing, payload) do
+    original =
+      Repo.get_by(SubscriptionChange,
+        team_id: team_id,
+        subscription_id: existing.id,
+        change_type: :start
+      )
+
+    if original && Canonical.hash(original.payload) == Canonical.hash(payload) do
+      existing
+    else
+      Repo.rollback(:conflict)
+    end
+  end
+
+  defp insert_started_subscription(scope, team_id, attrs, start) do
+    unless inside_contract?(start.contract, start.start_date, start.end_date) do
+      Repo.rollback(:outside_contract_period)
+    end
+
+    status =
+      if Date.after?(start.start_date, local_today(start.time_zone)),
+        do: :scheduled,
+        else: :active
+
+    subscription =
+      start.base_changeset
+      |> Ecto.Changeset.put_change(:status, status)
+      |> Ecto.Changeset.put_change(:billing_anchor_day, start.anchor)
+      |> Repo.insert!()
+
+    insert_subscription_version!(subscription, 1, %{
+      plan_version_id: attrs[:plan_version_id],
+      quantity: attrs[:quantity],
+      effective_start: start.start_date,
+      effective_end_exclusive: start.end_date,
+      price_overrides: start.overrides,
+      cancellation_policy: start.policy
+    })
+
+    Repo.insert!(%SubscriptionChange{
+      team_id: team_id,
+      subscription_id: subscription.id,
+      change_type: :start,
+      effective_date: start.start_date,
+      idempotency_key: attrs[:idempotency_key] || "start:#{start.external_id}",
+      actor_reference: actor_reference(scope),
+      payload: start.payload,
+      result: %{
+        "subscription_id" => subscription.id,
+        "status" => to_string(status),
+        "version" => 1
+      }
+    })
+
+    Audit.record!(scope, "contracts.subscription.started",
+      aggregate: {"subscription", subscription.id},
+      payload: %{
+        external_id: start.external_id,
+        status: status,
+        contract_id: start.contract.id
+      }
+    )
+
+    Outbox.emit!("subscription.started.v1",
+      aggregate: {"subscription", subscription.id},
+      team_id: team_id,
+      aggregate_version: 1,
+      correlation_id: scope.correlation_id,
+      payload: %{
+        external_id: start.external_id,
+        contract_id: start.contract.id,
+        plan_version_id: attrs[:plan_version_id],
+        quantity: start.quantity && Canonical.decimal_string(start.quantity),
+        start_date: Date.to_iso8601(start.start_date),
+        status: status
+      }
+    )
+
+    subscription
+  end
+
   defp version_change(scope, subscription, attrs, change_type) do
     with :ok <- authorize(scope, @write_roles) do
       team_id = Scope.team_id!(scope)
 
       Repo.transaction(fn ->
-        sub =
-          lock_subscription(team_id, subscription.id) || Repo.rollback(:subscription_not_found)
-
-        current = current_version!(sub)
-        effective_date = resolve_effective_date(attrs[:effective_date], sub.time_zone)
-
-        {plan_version_id, quantity} =
-          case change_type do
-            :quantity_change ->
-              quantity = to_decimal(attrs[:quantity]) || Repo.rollback(:invalid_quantity)
-              {current.plan_version_id, quantity}
-
-            :plan_change ->
-              plan_version_id = attrs[:plan_version_id] || Repo.rollback(:missing_plan_version)
-              {plan_version_id, to_decimal(attrs[:quantity]) || current.quantity}
-          end
-
-        payload =
-          stored_payload(%{
-            "change_type" => change_type,
-            "effective_date" => effective_date,
-            "plan_version_id" => plan_version_id,
-            "quantity" => quantity
-          })
-
-        key = attrs[:idempotency_key] || Ecto.UUID.generate()
-
-        case replayed_change(team_id, sub.id, key) do
-          %SubscriptionChange{} = original ->
-            replay_or_conflict(original, payload, sub)
-
-          nil ->
-            case StateMachine.transition(@subscription_machine, sub.status, :change) do
-              {:ok, :active} -> :ok
-              {:error, _} -> Repo.rollback(:invalid_state)
-            end
-
-            cond do
-              Date.before?(effective_date, current.effective_start) ->
-                Repo.rollback(:effective_date_in_past)
-
-              current.effective_end_exclusive != nil and
-                  not Date.before?(effective_date, current.effective_end_exclusive) ->
-                Repo.rollback(:effective_date_after_end)
-
-              true ->
-                :ok
-            end
-
-            # Close the current version at the effective date, then append the
-            # successor — order matters: the exclusion constraint is checked
-            # per statement.
-            current
-            |> Ecto.Changeset.change(effective_end_exclusive: effective_date)
-            |> Repo.update!()
-
-            next = sub.current_version + 1
-
-            insert_subscription_version!(sub, next, %{
-              plan_version_id: plan_version_id,
-              quantity: quantity,
-              effective_start: effective_date,
-              effective_end_exclusive: current.effective_end_exclusive,
-              price_overrides: current.price_overrides,
-              cancellation_policy: current.cancellation_policy
-            })
-
-            updated =
-              sub
-              |> Ecto.Changeset.change(current_version: next, version: sub.version + 1)
-              |> Repo.update!()
-
-            Repo.insert!(%SubscriptionChange{
-              team_id: team_id,
-              subscription_id: sub.id,
-              change_type: change_type,
-              effective_date: effective_date,
-              idempotency_key: key,
-              actor_reference: actor_reference(scope),
-              payload: payload,
-              result: %{"from_version" => sub.current_version, "to_version" => next}
-            })
-
-            Audit.record!(scope, "contracts.subscription.#{audit_suffix(change_type)}",
-              aggregate: {"subscription", sub.id},
-              payload: %{
-                effective_date: Date.to_iso8601(effective_date),
-                from_version: sub.current_version,
-                to_version: next
-              }
-            )
-
-            Outbox.emit!("subscription.changed.v1",
-              aggregate: {"subscription", sub.id},
-              team_id: team_id,
-              aggregate_version: next,
-              correlation_id: scope.correlation_id,
-              payload: %{
-                change: change_type,
-                external_id: sub.external_id,
-                effective_date: Date.to_iso8601(effective_date),
-                plan_version_id: plan_version_id,
-                quantity: Canonical.decimal_string(quantity),
-                from_version: sub.current_version,
-                to_version: next
-              }
-            )
-
-            updated
-        end
+        version_change_in_txn(scope, team_id, subscription, attrs, change_type)
       end)
     end
+  end
+
+  defp version_change_in_txn(scope, team_id, subscription, attrs, change_type) do
+    sub =
+      lock_subscription(team_id, subscription.id) || Repo.rollback(:subscription_not_found)
+
+    current = current_version!(sub)
+    effective_date = resolve_effective_date(attrs[:effective_date], sub.time_zone)
+
+    {plan_version_id, quantity} = version_change_target(change_type, attrs, current)
+
+    payload =
+      stored_payload(%{
+        "change_type" => change_type,
+        "effective_date" => effective_date,
+        "plan_version_id" => plan_version_id,
+        "quantity" => quantity
+      })
+
+    key = attrs[:idempotency_key] || Ecto.UUID.generate()
+
+    case replayed_change(team_id, sub.id, key) do
+      %SubscriptionChange{} = original ->
+        replay_or_conflict(original, payload, sub)
+
+      nil ->
+        apply_version_change(scope, team_id, sub, current, %{
+          change_type: change_type,
+          effective_date: effective_date,
+          plan_version_id: plan_version_id,
+          quantity: quantity,
+          payload: payload,
+          key: key
+        })
+    end
+  end
+
+  # Resolves the successor version's plan and quantity for the command type.
+  defp version_change_target(:quantity_change, attrs, current) do
+    quantity = to_decimal(attrs[:quantity]) || Repo.rollback(:invalid_quantity)
+    {current.plan_version_id, quantity}
+  end
+
+  defp version_change_target(:plan_change, attrs, current) do
+    plan_version_id = attrs[:plan_version_id] || Repo.rollback(:missing_plan_version)
+    {plan_version_id, to_decimal(attrs[:quantity]) || current.quantity}
+  end
+
+  defp apply_version_change(scope, team_id, sub, current, change) do
+    validate_change_transition(sub)
+    validate_effective_date_within_version(change.effective_date, current)
+
+    # Close the current version at the effective date, then append the
+    # successor — order matters: the exclusion constraint is checked
+    # per statement.
+    current
+    |> Ecto.Changeset.change(effective_end_exclusive: change.effective_date)
+    |> Repo.update!()
+
+    next = sub.current_version + 1
+
+    insert_subscription_version!(sub, next, %{
+      plan_version_id: change.plan_version_id,
+      quantity: change.quantity,
+      effective_start: change.effective_date,
+      effective_end_exclusive: current.effective_end_exclusive,
+      price_overrides: current.price_overrides,
+      cancellation_policy: current.cancellation_policy
+    })
+
+    updated =
+      sub
+      |> Ecto.Changeset.change(current_version: next, version: sub.version + 1)
+      |> Repo.update!()
+
+    Repo.insert!(%SubscriptionChange{
+      team_id: team_id,
+      subscription_id: sub.id,
+      change_type: change.change_type,
+      effective_date: change.effective_date,
+      idempotency_key: change.key,
+      actor_reference: actor_reference(scope),
+      payload: change.payload,
+      result: %{"from_version" => sub.current_version, "to_version" => next}
+    })
+
+    Audit.record!(scope, "contracts.subscription.#{audit_suffix(change.change_type)}",
+      aggregate: {"subscription", sub.id},
+      payload: %{
+        effective_date: Date.to_iso8601(change.effective_date),
+        from_version: sub.current_version,
+        to_version: next
+      }
+    )
+
+    Outbox.emit!("subscription.changed.v1",
+      aggregate: {"subscription", sub.id},
+      team_id: team_id,
+      aggregate_version: next,
+      correlation_id: scope.correlation_id,
+      payload: %{
+        change: change.change_type,
+        external_id: sub.external_id,
+        effective_date: Date.to_iso8601(change.effective_date),
+        plan_version_id: change.plan_version_id,
+        quantity: Canonical.decimal_string(change.quantity),
+        from_version: sub.current_version,
+        to_version: next
+      }
+    )
+
+    updated
+  end
+
+  defp validate_change_transition(sub) do
+    case StateMachine.transition(@subscription_machine, sub.status, :change) do
+      {:ok, :active} -> :ok
+      {:error, _} -> Repo.rollback(:invalid_state)
+    end
+  end
+
+  defp validate_effective_date_within_version(effective_date, current) do
+    cond do
+      Date.before?(effective_date, current.effective_start) ->
+        Repo.rollback(:effective_date_in_past)
+
+      current.effective_end_exclusive != nil and
+          not Date.before?(effective_date, current.effective_end_exclusive) ->
+        Repo.rollback(:effective_date_after_end)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp cancel_subscription_in_txn(scope, team_id, subscription, attrs) do
+    sub =
+      lock_subscription(team_id, subscription.id) || Repo.rollback(:subscription_not_found)
+
+    mode = attrs[:mode]
+
+    unless mode in [:immediate, :end_of_period], do: Repo.rollback(:invalid_mode)
+
+    reason = attrs[:reason]
+    current = current_version!(sub)
+
+    {event, effective_date} = cancellation_event_and_date(mode, attrs, sub.time_zone)
+
+    payload =
+      stored_payload(%{
+        "change_type" => "cancel",
+        "mode" => mode,
+        "effective_date" => effective_date,
+        "reason" => reason
+      })
+
+    key = attrs[:idempotency_key] || Ecto.UUID.generate()
+
+    case replayed_change(team_id, sub.id, key) do
+      %SubscriptionChange{} = original ->
+        replay_or_conflict(original, payload, sub)
+
+      nil ->
+        apply_cancellation(scope, team_id, sub, current, %{
+          mode: mode,
+          event: event,
+          effective_date: effective_date,
+          reason: reason,
+          payload: payload,
+          key: key
+        })
+    end
+  end
+
+  defp cancellation_event_and_date(:immediate, attrs, time_zone) do
+    {:cancel, resolve_effective_date(attrs[:effective_date], time_zone)}
+  end
+
+  defp cancellation_event_and_date(:end_of_period, attrs, _time_zone) do
+    case attrs[:period_end_date] do
+      %Date{} = period_end -> {:cancel_at_period_end, period_end}
+      _missing -> Repo.rollback(:missing_period_end_date)
+    end
+  end
+
+  defp apply_cancellation(scope, team_id, sub, current, cancellation) do
+    next_status =
+      case StateMachine.transition(@subscription_machine, sub.status, cancellation.event) do
+        {:ok, next_status} -> next_status
+        {:error, _} -> Repo.rollback(:invalid_state)
+      end
+
+    version_end = cancellation_version_end(sub, current, cancellation.effective_date)
+
+    current
+    |> Ecto.Changeset.change(
+      effective_end_exclusive: version_end,
+      status_reason: cancellation.reason
+    )
+    |> Repo.update!()
+
+    end_date_exclusive = cancellation_end_date(sub, cancellation.effective_date)
+
+    updated =
+      sub
+      |> Ecto.Changeset.change(
+        status: next_status,
+        end_date_exclusive: end_date_exclusive,
+        version: sub.version + 1
+      )
+      |> Repo.update!()
+
+    Repo.insert!(%SubscriptionChange{
+      team_id: team_id,
+      subscription_id: sub.id,
+      change_type: :cancel,
+      effective_date: cancellation.effective_date,
+      idempotency_key: cancellation.key,
+      actor_reference: actor_reference(scope),
+      payload: cancellation.payload,
+      result: %{"status" => to_string(next_status)}
+    })
+
+    Audit.record!(scope, "contracts.subscription.cancelled",
+      aggregate: {"subscription", sub.id},
+      payload: %{
+        mode: cancellation.mode,
+        effective_date: Date.to_iso8601(cancellation.effective_date),
+        reason: cancellation.reason,
+        status: next_status
+      }
+    )
+
+    Outbox.emit!("subscription.cancelled.v1",
+      aggregate: {"subscription", sub.id},
+      team_id: team_id,
+      aggregate_version: sub.current_version,
+      correlation_id: scope.correlation_id,
+      payload: %{
+        external_id: sub.external_id,
+        mode: cancellation.mode,
+        effective_date: Date.to_iso8601(cancellation.effective_date),
+        reason: cancellation.reason,
+        status: next_status
+      }
+    )
+
+    # BC-US-109: an immediate cancellation durably triggers the
+    # remaining-credit disposition evaluation for the customer.
+    if next_status == :cancelled do
+      %{subscription_id: sub.id}
+      |> BillingCore.Credits.TerminationDispositionWorker.new()
+      |> Oban.insert!()
+    end
+
+    updated
+  end
+
+  # Where the current version closes when the subscription is cancelled.
+  defp cancellation_version_end(sub, current, effective_date) do
+    cond do
+      sub.status == :scheduled ->
+        # Cancelled before start: the version never becomes effective.
+        current.effective_start
+
+      Date.before?(effective_date, current.effective_start) ->
+        Repo.rollback(:effective_date_in_past)
+
+      current.effective_end_exclusive != nil and
+          Date.after?(effective_date, current.effective_end_exclusive) ->
+        Repo.rollback(:effective_date_after_end)
+
+      true ->
+        effective_date
+    end
+  end
+
+  # A scheduled subscription is cancelled before start and keeps no end date.
+  defp cancellation_end_date(%Subscription{status: :scheduled}, _effective_date), do: nil
+
+  defp cancellation_end_date(sub, effective_date) do
+    unless Date.after?(effective_date, sub.start_date) do
+      Repo.rollback(:effective_date_in_past)
+    end
+
+    effective_date
   end
 
   defp status_change(scope, subscription, attrs, event) when event in [:pause, :resume] do
     with :ok <- authorize(scope, @write_roles) do
       team_id = Scope.team_id!(scope)
 
-      Repo.transaction(fn ->
-        sub =
-          lock_subscription(team_id, subscription.id) || Repo.rollback(:subscription_not_found)
-
-        effective_date = resolve_effective_date(attrs[:effective_date], sub.time_zone)
-
-        payload =
-          stored_payload(%{
-            "change_type" => event,
-            "effective_date" => effective_date,
-            "reason" => attrs[:reason]
-          })
-
-        key = attrs[:idempotency_key] || Ecto.UUID.generate()
-
-        case replayed_change(team_id, sub.id, key) do
-          %SubscriptionChange{} = original ->
-            replay_or_conflict(original, payload, sub)
-
-          nil ->
-            next_status =
-              case StateMachine.transition(@subscription_machine, sub.status, event) do
-                {:ok, next_status} -> next_status
-                {:error, _} -> Repo.rollback(:invalid_state)
-              end
-
-            updated =
-              sub
-              |> Ecto.Changeset.change(status: next_status, version: sub.version + 1)
-              |> Repo.update!()
-
-            Repo.insert!(%SubscriptionChange{
-              team_id: team_id,
-              subscription_id: sub.id,
-              change_type: event,
-              effective_date: effective_date,
-              idempotency_key: key,
-              actor_reference: actor_reference(scope),
-              payload: payload,
-              result: %{"status" => to_string(next_status)}
-            })
-
-            Audit.record!(scope, "contracts.subscription.#{event}d",
-              aggregate: {"subscription", sub.id},
-              payload: %{effective_date: Date.to_iso8601(effective_date), reason: attrs[:reason]}
-            )
-
-            Outbox.emit!("subscription.changed.v1",
-              aggregate: {"subscription", sub.id},
-              team_id: team_id,
-              aggregate_version: sub.current_version,
-              correlation_id: scope.correlation_id,
-              payload: %{
-                change: event,
-                external_id: sub.external_id,
-                effective_date: Date.to_iso8601(effective_date),
-                reason: attrs[:reason]
-              }
-            )
-
-            updated
-        end
-      end)
+      Repo.transaction(fn -> status_change_in_txn(scope, team_id, subscription, attrs, event) end)
     end
+  end
+
+  defp status_change_in_txn(scope, team_id, subscription, attrs, event) do
+    sub =
+      lock_subscription(team_id, subscription.id) || Repo.rollback(:subscription_not_found)
+
+    effective_date = resolve_effective_date(attrs[:effective_date], sub.time_zone)
+
+    payload =
+      stored_payload(%{
+        "change_type" => event,
+        "effective_date" => effective_date,
+        "reason" => attrs[:reason]
+      })
+
+    key = attrs[:idempotency_key] || Ecto.UUID.generate()
+
+    case replayed_change(team_id, sub.id, key) do
+      %SubscriptionChange{} = original ->
+        replay_or_conflict(original, payload, sub)
+
+      nil ->
+        apply_status_change(scope, team_id, sub, %{
+          event: event,
+          effective_date: effective_date,
+          reason: attrs[:reason],
+          payload: payload,
+          key: key
+        })
+    end
+  end
+
+  defp apply_status_change(scope, team_id, sub, status_change) do
+    event = status_change.event
+    effective_date = status_change.effective_date
+
+    next_status =
+      case StateMachine.transition(@subscription_machine, sub.status, event) do
+        {:ok, next_status} -> next_status
+        {:error, _} -> Repo.rollback(:invalid_state)
+      end
+
+    updated =
+      sub
+      |> Ecto.Changeset.change(status: next_status, version: sub.version + 1)
+      |> Repo.update!()
+
+    Repo.insert!(%SubscriptionChange{
+      team_id: team_id,
+      subscription_id: sub.id,
+      change_type: event,
+      effective_date: effective_date,
+      idempotency_key: status_change.key,
+      actor_reference: actor_reference(scope),
+      payload: status_change.payload,
+      result: %{"status" => to_string(next_status)}
+    })
+
+    Audit.record!(scope, "contracts.subscription.#{event}d",
+      aggregate: {"subscription", sub.id},
+      payload: %{
+        effective_date: Date.to_iso8601(effective_date),
+        reason: status_change.reason
+      }
+    )
+
+    Outbox.emit!("subscription.changed.v1",
+      aggregate: {"subscription", sub.id},
+      team_id: team_id,
+      aggregate_version: sub.current_version,
+      correlation_id: scope.correlation_id,
+      payload: %{
+        change: event,
+        external_id: sub.external_id,
+        effective_date: Date.to_iso8601(effective_date),
+        reason: status_change.reason
+      }
+    )
+
+    updated
   end
 
   defp system_status_sweep(query, event, change_label) do
@@ -1439,6 +1427,127 @@ defmodule BillingCore.Contracts do
 
   ## Charge instance internals
 
+  defp create_charge_instance_in_txn(scope, team_id, attrs) do
+    contract = fetch_contract!(team_id, attrs[:contract_id])
+
+    subscription_id = resolve_charge_subscription(team_id, contract, attrs[:subscription_id])
+    {price_component_id, amount_minor, quantity} = resolve_pricing_source(attrs)
+    currency = resolve_charge_currency(attrs, contract)
+
+    payload = %{
+      "external_id" => attrs[:external_id],
+      "contract_id" => contract.id,
+      "subscription_id" => subscription_id,
+      "product_id" => attrs[:product_id],
+      "product_version" => attrs[:product_version],
+      "price_component_id" => price_component_id,
+      "amount_minor" => amount_minor,
+      "quantity" => quantity,
+      "currency" => currency,
+      "eligible_on" => attrs[:eligible_on],
+      "recognition_mode" => attrs[:recognition_mode],
+      "service_start" => attrs[:service_start],
+      "service_end_exclusive" => attrs[:service_end_exclusive]
+    }
+
+    payload_hash = Canonical.hash(payload)
+
+    case find_existing_charge(team_id, attrs[:external_id]) do
+      %ChargeInstance{} = original ->
+        replay_charge_or_conflict(original, payload_hash)
+
+      nil ->
+        insert_charge_instance(scope, team_id, contract, attrs, %{
+          subscription_id: subscription_id,
+          price_component_id: price_component_id,
+          amount_minor: amount_minor,
+          quantity: quantity,
+          currency: currency,
+          payload: payload,
+          payload_hash: payload_hash
+        })
+    end
+  end
+
+  defp find_existing_charge(team_id, external_id) when is_binary(external_id) do
+    Repo.get_by(ChargeInstance, team_id: team_id, external_id: external_id)
+  end
+
+  defp find_existing_charge(_team_id, _external_id), do: nil
+
+  defp replay_charge_or_conflict(%ChargeInstance{} = original, payload_hash) do
+    if original.payload_hash == payload_hash do
+      original
+    else
+      Repo.rollback(:conflict)
+    end
+  end
+
+  defp resolve_charge_currency(attrs, contract) do
+    case attrs[:currency] do
+      nil -> contract.currency
+      currency when currency == contract.currency -> currency
+      _mismatch -> Repo.rollback(:currency_mismatch)
+    end
+  end
+
+  defp insert_charge_instance(scope, team_id, contract, attrs, resolved) do
+    changeset =
+      ChargeInstance.create_changeset(
+        %ChargeInstance{
+          team_id: team_id,
+          contract_id: contract.id,
+          subscription_id: resolved.subscription_id,
+          status: :pending,
+          canonical_payload: stored_payload(resolved.payload),
+          payload_hash: resolved.payload_hash
+        },
+        %{
+          external_id: attrs[:external_id],
+          product_id: attrs[:product_id],
+          product_version: attrs[:product_version],
+          price_component_id: resolved.price_component_id,
+          eligible_on: attrs[:eligible_on],
+          quantity: resolved.quantity,
+          amount_minor: resolved.amount_minor,
+          currency: resolved.currency,
+          recognition_mode: attrs[:recognition_mode],
+          service_start: attrs[:service_start],
+          service_end_exclusive: attrs[:service_end_exclusive]
+        }
+      )
+
+    charge =
+      case Repo.insert(changeset) do
+        {:ok, charge} -> charge
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+
+    Audit.record!(scope, "contracts.charge_instance.created",
+      aggregate: {"charge_instance", charge.id},
+      payload: %{
+        external_id: charge.external_id,
+        contract_id: contract.id,
+        payload_hash: resolved.payload_hash
+      }
+    )
+
+    Outbox.emit!("charge_instance.created.v1",
+      aggregate: {"charge_instance", charge.id},
+      team_id: team_id,
+      correlation_id: scope.correlation_id,
+      payload: %{
+        external_id: charge.external_id,
+        contract_id: contract.id,
+        subscription_id: resolved.subscription_id,
+        eligible_on: to_string(charge.eligible_on),
+        recognition_mode: charge.recognition_mode
+      }
+    )
+
+    charge
+  end
+
   defp resolve_charge_subscription(_team_id, _contract, nil), do: nil
 
   defp resolve_charge_subscription(team_id, contract, subscription_id) do
@@ -1467,25 +1576,41 @@ defmodule BillingCore.Contracts do
         Repo.rollback(:missing_pricing_source)
 
       not is_nil(amount_minor) ->
-        unless is_integer(amount_minor), do: Repo.rollback(:invalid_amount)
-        if amount_minor < 0, do: Repo.rollback(:negative_amount)
-
-        quantity = to_decimal(attrs[:quantity]) || Decimal.new(1)
-
-        unless Decimal.eq?(quantity, Decimal.new(1)), do: Repo.rollback(:invalid_quantity)
-
-        {nil, amount_minor, Decimal.new(1)}
+        fixed_amount_pricing_source(attrs, amount_minor)
 
       true ->
-        quantity = to_decimal(attrs[:quantity]) || Repo.rollback(:invalid_quantity)
-
-        if Decimal.compare(quantity, 0) != :gt, do: Repo.rollback(:invalid_quantity)
-
-        {price_component_id, nil, quantity}
+        price_component_pricing_source(attrs, price_component_id)
     end
   end
 
+  defp fixed_amount_pricing_source(attrs, amount_minor) do
+    unless is_integer(amount_minor), do: Repo.rollback(:invalid_amount)
+    if amount_minor < 0, do: Repo.rollback(:negative_amount)
+
+    quantity = to_decimal(attrs[:quantity]) || Decimal.new(1)
+
+    unless Decimal.eq?(quantity, Decimal.new(1)), do: Repo.rollback(:invalid_quantity)
+
+    {nil, amount_minor, Decimal.new(1)}
+  end
+
+  defp price_component_pricing_source(attrs, price_component_id) do
+    quantity = to_decimal(attrs[:quantity]) || Repo.rollback(:invalid_quantity)
+
+    if Decimal.compare(quantity, 0) != :gt, do: Repo.rollback(:invalid_quantity)
+
+    {price_component_id, nil, quantity}
+  end
+
   ## Shared helpers
+
+  # Fetches the team's contract inside a transaction or rolls back.
+  defp fetch_contract!(team_id, contract_id) do
+    case fetch_team_row(Contract, team_id, contract_id) do
+      {:ok, contract} -> contract
+      {:error, :not_found} -> Repo.rollback(:contract_not_found)
+    end
+  end
 
   defp ensure_same_team(%Scope{} = scope, team_id) do
     if Scope.team_id!(scope) == team_id, do: :ok, else: {:error, :unauthorized}

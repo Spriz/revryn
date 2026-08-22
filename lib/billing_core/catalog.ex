@@ -1234,30 +1234,48 @@ defmodule BillingCore.Catalog do
   # BC-US-014 publication validation for one component. Runs inside the
   # publish transaction; failures roll back with a component-tagged reason.
   defp validated_component_map!(scope, %PriceComponent{} = component) do
+    product = fetch_active_product!(scope, component)
+    product_version = fetch_product_version!(component)
+    model = parse_component_model!(component)
+    ensure_service_period_source!(component)
+    component_map(component, product, product_version, model)
+  end
+
+  defp fetch_active_product!(scope, component) do
     product = Repo.get_by(Product, id: component.product_id, team_id: Scope.team_id!(scope))
 
     if is_nil(product) or product.status != :active do
       Repo.rollback({:product_inactive, component.code})
     end
 
-    product_version =
-      Repo.get_by(ProductVersion,
-        product_id: component.product_id,
-        version: component.product_version
-      ) || Repo.rollback({:missing_product_version, component.code})
+    product
+  end
 
-    model =
-      case Model.from_map(component.pricing_definition) do
-        {:ok, model} -> model
-        {:error, reasons} -> Repo.rollback({:invalid_pricing_definition, component.code, reasons})
-      end
+  defp fetch_product_version!(component) do
+    Repo.get_by(ProductVersion,
+      product_id: component.product_id,
+      version: component.product_version
+    ) || Repo.rollback({:missing_product_version, component.code})
+  end
 
-    # Defense in depth: the schema and a database CHECK already enforce this
-    # (SPEC §9.4 — over_time lines require a service period source).
+  defp parse_component_model!(component) do
+    case Model.from_map(component.pricing_definition) do
+      {:ok, model} -> model
+      {:error, reasons} -> Repo.rollback({:invalid_pricing_definition, component.code, reasons})
+    end
+  end
+
+  # Defense in depth: the schema and a database CHECK already enforce this
+  # (SPEC §9.4 — over_time lines require a service period source).
+  defp ensure_service_period_source!(component) do
     if component.recognition_mode == :over_time and is_nil(component.service_period_source) do
       Repo.rollback({:missing_service_period_source, component.code})
     end
 
+    :ok
+  end
+
+  defp component_map(component, product, product_version, model) do
     %{
       "code" => component.code,
       "product_id" => component.product_id,

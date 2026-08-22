@@ -467,18 +467,7 @@ defmodule BillingCore.Credits.CloseWorkflow do
     cutoff = attrs.transaction_cutoff
 
     close_lock!(team_id, currency, period_start)
-
-    if existing =
-         Repo.one(
-           from close in Close,
-             where:
-               close.team_id == ^team_id and close.currency == ^currency and
-                 close.period_start == ^period_start and
-                 close.period_end_exclusive == ^period_end,
-             limit: 1
-         ) do
-      Repo.rollback({:already_exists, existing.id})
-    end
+    ensure_no_existing_close!(team_id, currency, period_start, period_end)
 
     policy = policy_for_close!(team_id, attrs.policy_version_id, period_start)
 
@@ -498,15 +487,7 @@ defmodule BillingCore.Credits.CloseWorkflow do
       approved_prior_ids
     )
 
-    effect =
-      Enum.reduce(transactions, 0, fn transaction, total ->
-        case Calculation.liability_effect(Map.from_struct(transaction)) do
-          {:ok, {_movement, signed_effect}} -> total + signed_effect
-          {:error, reason} -> Repo.rollback({:invalid_credit_transaction, transaction.id, reason})
-        end
-      end)
-
-    closing = opening + effect
+    closing = opening + liability_effect_total!(transactions)
 
     if closing < 0 do
       Repo.rollback({:negative_closing_balance, closing})
@@ -530,11 +511,7 @@ defmodule BillingCore.Credits.CloseWorkflow do
       transactions: transactions
     }
 
-    snapshot =
-      case CloseKernel.calculate(calculation_input) do
-        {:ok, snapshot} -> snapshot
-        {:error, reason} -> Repo.rollback(reason)
-      end
+    snapshot = calculate_snapshot!(calculation_input)
 
     close_id = Ecto.UUID.generate()
 
@@ -597,6 +574,36 @@ defmodule BillingCore.Credits.CloseWorkflow do
     )
 
     Repo.preload(close, [:policy_version, :movements, :transaction_memberships])
+  end
+
+  defp ensure_no_existing_close!(team_id, currency, period_start, period_end) do
+    if existing =
+         Repo.one(
+           from close in Close,
+             where:
+               close.team_id == ^team_id and close.currency == ^currency and
+                 close.period_start == ^period_start and
+                 close.period_end_exclusive == ^period_end,
+             limit: 1
+         ) do
+      Repo.rollback({:already_exists, existing.id})
+    end
+  end
+
+  defp liability_effect_total!(transactions) do
+    Enum.reduce(transactions, 0, fn transaction, total ->
+      case Calculation.liability_effect(Map.from_struct(transaction)) do
+        {:ok, {_movement, signed_effect}} -> total + signed_effect
+        {:error, reason} -> Repo.rollback({:invalid_credit_transaction, transaction.id, reason})
+      end
+    end)
+  end
+
+  defp calculate_snapshot!(calculation_input) do
+    case CloseKernel.calculate(calculation_input) do
+      {:ok, snapshot} -> snapshot
+      {:error, reason} -> Repo.rollback(reason)
+    end
   end
 
   defp request_reversal_locked!(scope, close_id, reason) do
@@ -930,12 +937,7 @@ defmodule BillingCore.Credits.CloseWorkflow do
 
     case previous do
       nil ->
-        if Map.has_key?(attrs, :bootstrap_opening_minor) and
-             is_integer(attrs.bootstrap_opening_minor) and attrs.bootstrap_opening_minor >= 0 do
-          {attrs.bootstrap_opening_minor, nil, nil}
-        else
-          Repo.rollback(:bootstrap_opening_required)
-        end
+        {bootstrap_opening!(attrs), nil, nil}
 
       %Close{state: :reversed} = previous ->
         Repo.rollback({:previous_close_reversed, previous.id})
@@ -946,6 +948,15 @@ defmodule BillingCore.Credits.CloseWorkflow do
 
       %Close{state: state} ->
         Repo.rollback({:previous_close_not_accepted, state})
+    end
+  end
+
+  defp bootstrap_opening!(attrs) do
+    if Map.has_key?(attrs, :bootstrap_opening_minor) and
+         is_integer(attrs.bootstrap_opening_minor) and attrs.bootstrap_opening_minor >= 0 do
+      attrs.bootstrap_opening_minor
+    else
+      Repo.rollback(:bootstrap_opening_required)
     end
   end
 

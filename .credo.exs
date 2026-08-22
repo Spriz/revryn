@@ -1,11 +1,10 @@
-# Credo gate for CI (`mix credo` runs in the test job).
+# Credo gate for CI (`mix credo`, also part of `mix precommit`).
 #
-# Thresholds for Nesting and CyclomaticComplexity are raised from the
-# defaults (2 and 9): the long transactional domain functions here are
-# deliberate — a money movement reads as one auditable unit, guarded by
-# the workflow/property suites rather than by decomposition. The limits
-# are pinned just above the current maxima so the gate still binds:
-# anything deeper/more complex than today's worst case fails CI.
+# CyclomaticComplexity stays at the Credo default (9): complex functions
+# get decomposed into simple, flat helpers — plain repetition beats clever
+# indirection here. Nesting is raised 2 → 3 only because idiomatic
+# Phoenix/Ecto code (with → case → if) routinely sits at 3; anything
+# deeper gets flattened into helpers.
 %{
   configs: [
     %{
@@ -17,8 +16,7 @@
       strict: false,
       checks: %{
         extra: [
-          {Credo.Check.Refactor.Nesting, max_nesting: 5},
-          {Credo.Check.Refactor.CyclomaticComplexity, max_complexity: 21}
+          {Credo.Check.Refactor.Nesting, max_nesting: 3}
         ]
       }
     }

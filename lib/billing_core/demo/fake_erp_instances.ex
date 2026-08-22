@@ -80,33 +80,46 @@ defmodule BillingCore.Demo.FakeERPInstances do
       when is_integer(version) and version > 0 and is_binary(sha256) do
     bytes = :erlang.term_to_binary(export, [:deterministic])
 
-    case Repo.one(from i in FakeERPInstance, where: i.id == ^instance_id and i.state == :active) do
-      nil ->
-        {:error, :not_found}
-
-      instance ->
-        expected_sha256 = binary_sha256(export.payload)
-
-        if version == @snapshot_format_version and sha256 == expected_sha256 do
-          instance
-          |> Ecto.Changeset.change(
-            snapshot: bytes,
-            snapshot_sha256: sha256,
-            snapshot_format_version: version
-          )
-          |> Ecto.Changeset.optimistic_lock(:lock_version)
-          |> Repo.update()
-          |> case do
-            {:ok, _} -> :ok
-            {:error, changeset} -> {:error, changeset}
-          end
-        else
-          {:error, :snapshot_hash_mismatch}
-        end
+    case fetch_active_instance(instance_id) do
+      nil -> {:error, :not_found}
+      instance -> store_verified_snapshot(instance, export, bytes)
     end
   end
 
   def persist_snapshot(_instance_id, _export), do: {:error, :invalid_snapshot}
+
+  defp fetch_active_instance(instance_id) do
+    Repo.one(from i in FakeERPInstance, where: i.id == ^instance_id and i.state == :active)
+  end
+
+  defp store_verified_snapshot(
+         instance,
+         %{format_version: version, sha256: sha256} = export,
+         bytes
+       ) do
+    expected_sha256 = binary_sha256(export.payload)
+
+    if version == @snapshot_format_version and sha256 == expected_sha256 do
+      update_snapshot_columns(instance, bytes, sha256, version)
+    else
+      {:error, :snapshot_hash_mismatch}
+    end
+  end
+
+  defp update_snapshot_columns(instance, bytes, sha256, version) do
+    instance
+    |> Ecto.Changeset.change(
+      snapshot: bytes,
+      snapshot_sha256: sha256,
+      snapshot_format_version: version
+    )
+    |> Ecto.Changeset.optimistic_lock(:lock_version)
+    |> Repo.update()
+    |> case do
+      {:ok, _} -> :ok
+      {:error, changeset} -> {:error, changeset}
+    end
+  end
 
   defp active_instance(%Connection{id: connection_id}) do
     Repo.one(
@@ -135,24 +148,38 @@ defmodule BillingCore.Demo.FakeERPInstances do
          snapshot_format_version: stored_version
        })
        when is_binary(bytes) and is_binary(stored_sha256) do
-    try do
-      case :erlang.binary_to_term(bytes, [:safe]) do
-        %{format_version: version, payload: payload, sha256: sha256} = export
-        when is_integer(version) and version > 0 and is_binary(payload) and is_binary(sha256) ->
-          if version == @snapshot_format_version and stored_version == version and
-               sha256 == stored_sha256 and sha256 == binary_sha256(payload),
-             do: {:ok, export},
-             else: {:error, :corrupt_snapshot}
-
-        _other ->
-          {:error, :corrupt_snapshot}
-      end
-    rescue
-      ArgumentError -> {:error, :corrupt_snapshot}
+    case decode_snapshot_bytes(bytes) do
+      {:ok, export} -> validate_decoded_export(export, stored_sha256, stored_version)
+      :error -> {:error, :corrupt_snapshot}
     end
   end
 
   defp decode_snapshot(_), do: {:error, :corrupt_snapshot}
+
+  defp decode_snapshot_bytes(bytes) do
+    {:ok, :erlang.binary_to_term(bytes, [:safe])}
+  rescue
+    ArgumentError -> :error
+  end
+
+  defp validate_decoded_export(
+         %{format_version: version, payload: payload, sha256: sha256} = export,
+         stored_sha256,
+         stored_version
+       )
+       when is_integer(version) and version > 0 and is_binary(payload) and is_binary(sha256) do
+    if export_matches_stored?(version, payload, sha256, stored_sha256, stored_version),
+      do: {:ok, export},
+      else: {:error, :corrupt_snapshot}
+  end
+
+  defp validate_decoded_export(_other, _stored_sha256, _stored_version),
+    do: {:error, :corrupt_snapshot}
+
+  defp export_matches_stored?(version, payload, sha256, stored_sha256, stored_version) do
+    version == @snapshot_format_version and stored_version == version and
+      sha256 == stored_sha256 and sha256 == binary_sha256(payload)
+  end
 
   defp ensure_fake_provider(%Connection{provider: "fake"}), do: :ok
   defp ensure_fake_provider(_), do: {:error, :invalid_demo_provider}

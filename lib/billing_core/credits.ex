@@ -387,51 +387,59 @@ defmodule BillingCore.Credits do
         Repo.rollback(:insufficient_credit)
 
       {:ok, allocations} ->
-        allocations
-        |> Enum.with_index()
-        |> Enum.each(fn {{grant, amount}, seq} ->
-          ledger!(actor, account, :reserve, %{
-            grant_id: grant.id,
-            amount_minor: amount,
-            idempotency_key: batch_row_key(:reserve, idempotency_key, seq),
-            invoice_intent_id: opts[:invoice_intent_id],
-            reason_code: opts[:reason_code],
-            occurred_at: now,
-            metadata: %{"batch_key" => idempotency_key, "seq" => seq}
-          })
-
-          update_grant!(grant, %{reserved_minor: grant.reserved_minor + amount}, fn g ->
-            if g.status == :reserved, do: g.status, else: grant_status!(g, :reserve)
-          end)
-        end)
-
-        shift_account!(account, -amount_minor, amount_minor)
-        result = Enum.map(allocations, fn {grant, amount} -> {grant.id, amount} end)
-
-        Audit.record!(actor, "credits.reserved",
-          aggregate: {:credit_account, account.id},
-          team_id: account.team_id,
-          payload: %{
-            amount_minor: amount_minor,
-            idempotency_key: idempotency_key,
-            allocations: allocation_payload(result)
-          }
-        )
-
-        Outbox.emit!("customer_credit.reserved.v1",
-          aggregate: {:credit_account, account.id},
-          team_id: account.team_id,
-          correlation_id: actor_correlation_id(actor),
-          payload: %{
-            amount_minor: amount_minor,
-            currency: account.currency,
-            invoice_intent_id: opts[:invoice_intent_id],
-            allocations: allocation_payload(result)
-          }
-        )
-
-        result
+        record_reservation!(actor, account, allocations, amount_minor, idempotency_key, opts, now)
     end
+  end
+
+  defp record_reservation!(actor, account, allocations, amount_minor, idempotency_key, opts, now) do
+    allocations
+    |> Enum.with_index()
+    |> Enum.each(fn {{grant, amount}, seq} ->
+      ledger!(actor, account, :reserve, %{
+        grant_id: grant.id,
+        amount_minor: amount,
+        idempotency_key: batch_row_key(:reserve, idempotency_key, seq),
+        invoice_intent_id: opts[:invoice_intent_id],
+        reason_code: opts[:reason_code],
+        occurred_at: now,
+        metadata: %{"batch_key" => idempotency_key, "seq" => seq}
+      })
+
+      reserve_grant!(grant, amount)
+    end)
+
+    shift_account!(account, -amount_minor, amount_minor)
+    result = Enum.map(allocations, fn {grant, amount} -> {grant.id, amount} end)
+
+    Audit.record!(actor, "credits.reserved",
+      aggregate: {:credit_account, account.id},
+      team_id: account.team_id,
+      payload: %{
+        amount_minor: amount_minor,
+        idempotency_key: idempotency_key,
+        allocations: allocation_payload(result)
+      }
+    )
+
+    Outbox.emit!("customer_credit.reserved.v1",
+      aggregate: {:credit_account, account.id},
+      team_id: account.team_id,
+      correlation_id: actor_correlation_id(actor),
+      payload: %{
+        amount_minor: amount_minor,
+        currency: account.currency,
+        invoice_intent_id: opts[:invoice_intent_id],
+        allocations: allocation_payload(result)
+      }
+    )
+
+    result
+  end
+
+  defp reserve_grant!(grant, amount) do
+    update_grant!(grant, %{reserved_minor: grant.reserved_minor + amount}, fn g ->
+      if g.status == :reserved, do: g.status, else: grant_status!(g, :reserve)
+    end)
   end
 
   @doc """
@@ -551,40 +559,12 @@ defmodule BillingCore.Credits do
         metadata: %{"batch_key" => idempotency_key, "seq" => seq}
       })
 
-      case type do
-        :release ->
-          update_grant!(grant, %{reserved_minor: grant.reserved_minor - amount}, fn g ->
-            if g.reserved_minor == 0, do: grant_status!(g, :release), else: g.status
-          end)
-
-        :apply ->
-          update_grant!(
-            grant,
-            %{
-              reserved_minor: grant.reserved_minor - amount,
-              remaining_minor: grant.remaining_minor - amount
-            },
-            fn g ->
-              cond do
-                g.remaining_minor == 0 -> grant_status!(g, :apply_full)
-                g.reserved_minor == 0 -> grant_status!(g, :apply_partial)
-                true -> g.status
-              end
-            end
-          )
-      end
+      unwind_grant!(type, grant, amount)
     end)
 
-    case type do
-      :release -> shift_account!(account, total, -total)
-      :apply -> shift_account!(account, 0, -total)
-    end
+    unwind_shift_account!(account, type, total)
 
-    {event, audit_event} =
-      case type do
-        :release -> {"customer_credit.released.v1", "credits.released"}
-        :apply -> {"customer_credit.applied.v1", "credits.applied"}
-      end
+    {event, audit_event} = unwind_event_names(type)
 
     Audit.record!(actor, audit_event,
       aggregate: {:credit_account, account.id},
@@ -610,6 +590,35 @@ defmodule BillingCore.Credits do
 
     allocations
   end
+
+  defp unwind_grant!(:release, grant, amount) do
+    update_grant!(grant, %{reserved_minor: grant.reserved_minor - amount}, fn g ->
+      if g.reserved_minor == 0, do: grant_status!(g, :release), else: g.status
+    end)
+  end
+
+  defp unwind_grant!(:apply, grant, amount) do
+    update_grant!(
+      grant,
+      %{
+        reserved_minor: grant.reserved_minor - amount,
+        remaining_minor: grant.remaining_minor - amount
+      },
+      fn g ->
+        cond do
+          g.remaining_minor == 0 -> grant_status!(g, :apply_full)
+          g.reserved_minor == 0 -> grant_status!(g, :apply_partial)
+          true -> g.status
+        end
+      end
+    )
+  end
+
+  defp unwind_shift_account!(account, :release, total), do: shift_account!(account, total, -total)
+  defp unwind_shift_account!(account, :apply, total), do: shift_account!(account, 0, -total)
+
+  defp unwind_event_names(:release), do: {"customer_credit.released.v1", "credits.released"}
+  defp unwind_event_names(:apply), do: {"customer_credit.applied.v1", "credits.applied"}
 
   ## Refund flow (BC-US-109)
 
@@ -882,18 +891,7 @@ defmodule BillingCore.Credits do
             &grant_status!(&1, :reverse_expiry)
           )
 
-        if operation_id do
-          operation = Operations.get!(operation_id)
-
-          if operation.state == "queued" do
-            operation
-            |> Operations.transition!(:claim)
-            |> Operations.transition!(:fail, %{
-              safe_error_code: "expiry_reversed",
-              safe_error_summary: "expiry schedule reversed before deadline"
-            })
-          end
-        end
+        fail_pending_expiry_operation!(operation_id)
 
         Audit.record!(scope, "credits.expiry.reversed",
           aggregate: {:credit_grant, grant.id},
@@ -903,6 +901,21 @@ defmodule BillingCore.Credits do
 
         updated
       end)
+    end
+  end
+
+  defp fail_pending_expiry_operation!(nil), do: :ok
+
+  defp fail_pending_expiry_operation!(operation_id) do
+    operation = Operations.get!(operation_id)
+
+    if operation.state == "queued" do
+      operation
+      |> Operations.transition!(:claim)
+      |> Operations.transition!(:fail, %{
+        safe_error_code: "expiry_reversed",
+        safe_error_summary: "expiry schedule reversed before deadline"
+      })
     end
   end
 
@@ -936,68 +949,78 @@ defmodule BillingCore.Credits do
   end
 
   defp expire_grant(grant_id, now) do
-    result =
-      Repo.transaction(fn ->
-        grant = Repo.get!(CreditGrant, grant_id)
-        account = lock_account!(grant.credit_account_id, grant.team_id)
-        grant = account |> lock_grants!([grant_id]) |> Map.fetch!(grant_id)
-
-        # Re-check under lock: the schedule may have been reversed meanwhile.
-        if grant.status != :expiry_scheduled or DateTime.after?(grant.expires_at, now) do
-          Repo.rollback(:not_due)
-        end
-
-        operation =
-          case grant.metadata["expiry_operation_id"] do
-            nil -> nil
-            id -> Operations.get!(id)
-          end
-
-        operation =
-          if operation && operation.state == "queued",
-            do: Operations.transition!(operation, :claim),
-            else: operation
-
-        amount = grant.remaining_minor
-
-        ledger!(:system, account, :expire, %{
-          grant_id: grant.id,
-          amount_minor: amount,
-          idempotency_key: "credit_expiry:#{grant.id}",
-          operation_id: operation && operation.id,
-          occurred_at: DateTime.utc_now()
-        })
-
-        update_grant!(grant, %{remaining_minor: 0}, &grant_status!(&1, :expire))
-        shift_account!(account, -amount, 0)
-
-        Audit.record!(:system, "credits.expiry.executed",
-          aggregate: {:credit_grant, grant.id},
-          team_id: account.team_id,
-          payload: %{operation_id: operation && operation.id, amount_minor: amount}
-        )
-
-        Outbox.emit!("customer_credit.expired.v1",
-          aggregate: {:credit_grant, grant.id},
-          team_id: account.team_id,
-          payload: %{
-            credit_account_id: account.id,
-            operation_id: operation && operation.id,
-            amount_minor: amount,
-            currency: grant.currency
-          }
-        )
-
-        if operation && operation.state == "executing" do
-          Operations.transition!(operation, :succeed)
-        end
-
-        %{grant_id: grant.id, amount_minor: amount}
-      end)
+    result = Repo.transaction(fn -> expire_grant_in_txn(grant_id, now) end)
 
     case result do
       {:ok, entry} -> entry
       {:error, _skipped} -> nil
+    end
+  end
+
+  defp expire_grant_in_txn(grant_id, now) do
+    grant = Repo.get!(CreditGrant, grant_id)
+    account = lock_account!(grant.credit_account_id, grant.team_id)
+    grant = account |> lock_grants!([grant_id]) |> Map.fetch!(grant_id)
+
+    # Re-check under lock: the schedule may have been reversed meanwhile.
+    if grant.status != :expiry_scheduled or DateTime.after?(grant.expires_at, now) do
+      Repo.rollback(:not_due)
+    end
+
+    operation = claim_expiry_operation!(grant)
+    amount = grant.remaining_minor
+
+    write_expiry!(account, grant, operation, amount)
+    succeed_expiry_operation!(operation)
+
+    %{grant_id: grant.id, amount_minor: amount}
+  end
+
+  defp claim_expiry_operation!(grant) do
+    operation =
+      case grant.metadata["expiry_operation_id"] do
+        nil -> nil
+        id -> Operations.get!(id)
+      end
+
+    if operation && operation.state == "queued",
+      do: Operations.transition!(operation, :claim),
+      else: operation
+  end
+
+  defp write_expiry!(account, grant, operation, amount) do
+    ledger!(:system, account, :expire, %{
+      grant_id: grant.id,
+      amount_minor: amount,
+      idempotency_key: "credit_expiry:#{grant.id}",
+      operation_id: operation && operation.id,
+      occurred_at: DateTime.utc_now()
+    })
+
+    update_grant!(grant, %{remaining_minor: 0}, &grant_status!(&1, :expire))
+    shift_account!(account, -amount, 0)
+
+    Audit.record!(:system, "credits.expiry.executed",
+      aggregate: {:credit_grant, grant.id},
+      team_id: account.team_id,
+      payload: %{operation_id: operation && operation.id, amount_minor: amount}
+    )
+
+    Outbox.emit!("customer_credit.expired.v1",
+      aggregate: {:credit_grant, grant.id},
+      team_id: account.team_id,
+      payload: %{
+        credit_account_id: account.id,
+        operation_id: operation && operation.id,
+        amount_minor: amount,
+        currency: grant.currency
+      }
+    )
+  end
+
+  defp succeed_expiry_operation!(operation) do
+    if operation && operation.state == "executing" do
+      Operations.transition!(operation, :succeed)
     end
   end
 
@@ -1258,18 +1281,20 @@ defmodule BillingCore.Credits do
       type ->
         sums
         |> Map.update(type, tx.amount_minor, &(&1 + tx.amount_minor))
-        |> then(fn acc ->
-          if tx.grant_id do
-            Map.update(
-              acc,
-              {:grant_sums, tx.grant_id},
-              %{type => tx.amount_minor},
-              &Map.update(&1, type, tx.amount_minor, fn n -> n + tx.amount_minor end)
-            )
-          else
-            acc
-          end
-        end)
+        |> accumulate_grant_sum(tx, type)
+    end
+  end
+
+  defp accumulate_grant_sum(sums, tx, type) do
+    if tx.grant_id do
+      Map.update(
+        sums,
+        {:grant_sums, tx.grant_id},
+        %{type => tx.amount_minor},
+        &Map.update(&1, type, tx.amount_minor, fn n -> n + tx.amount_minor end)
+      )
+    else
+      sums
     end
   end
 

@@ -151,55 +151,67 @@ defmodule BillingCore.Credits.Settlements do
     with :ok <- authorize(scope, @write_roles),
          :ok <- ensure_presence(external_reference) do
       Repo.transaction(fn ->
-        settlement =
-          Repo.one(
-            from s in CreditSettlement,
-              where: s.id == ^settlement_id and s.team_id == ^Scope.team_id!(scope),
-              lock: "FOR UPDATE"
-          ) || Repo.rollback(:not_found)
-
-        cond do
-          settlement.mode != :external_reference ->
-            Repo.rollback(:not_external_mode)
-
-          settlement.state == :reconciled ->
-            # Reconciled exactly once: replays with the same reference are
-            # idempotent, a different reference is a conflict.
-            if settlement.external_reference == external_reference,
-              do: settlement,
-              else: Repo.rollback(:already_reconciled)
-
-          true ->
-            reconciled =
-              settlement
-              |> Ecto.Changeset.change(
-                state: :reconciled,
-                external_reference: external_reference,
-                reconciled_at: DateTime.utc_now()
-              )
-              |> Repo.update!()
-
-            Audit.record!(scope, "credits.settlement.reconciled",
-              aggregate: {:customer_credit_settlement, reconciled.id},
-              payload: %{external_reference: external_reference, mode: :external_reference}
-            )
-
-            Outbox.emit!("customer_credit_settlement.reconciled.v1",
-              aggregate: {:customer_credit_settlement, reconciled.id},
-              team_id: reconciled.team_id,
-              correlation_id: scope.correlation_id,
-              payload: %{
-                invoice_intent_id: reconciled.invoice_intent_id,
-                amount_minor: reconciled.amount_minor,
-                currency: reconciled.currency,
-                external_reference: external_reference
-              }
-            )
-
-            reconciled
-        end
+        record_external_settlement_in_txn(scope, settlement_id, external_reference)
       end)
     end
+  end
+
+  defp record_external_settlement_in_txn(scope, settlement_id, external_reference) do
+    settlement =
+      Repo.one(
+        from s in CreditSettlement,
+          where: s.id == ^settlement_id and s.team_id == ^Scope.team_id!(scope),
+          lock: "FOR UPDATE"
+      ) || Repo.rollback(:not_found)
+
+    cond do
+      settlement.mode != :external_reference ->
+        Repo.rollback(:not_external_mode)
+
+      settlement.state == :reconciled ->
+        replay_reconciled_settlement!(settlement, external_reference)
+
+      true ->
+        reconcile_settlement!(scope, settlement, external_reference)
+    end
+  end
+
+  # Reconciled exactly once: replays with the same reference are
+  # idempotent, a different reference is a conflict.
+  defp replay_reconciled_settlement!(settlement, external_reference) do
+    if settlement.external_reference == external_reference,
+      do: settlement,
+      else: Repo.rollback(:already_reconciled)
+  end
+
+  defp reconcile_settlement!(scope, settlement, external_reference) do
+    reconciled =
+      settlement
+      |> Ecto.Changeset.change(
+        state: :reconciled,
+        external_reference: external_reference,
+        reconciled_at: DateTime.utc_now()
+      )
+      |> Repo.update!()
+
+    Audit.record!(scope, "credits.settlement.reconciled",
+      aggregate: {:customer_credit_settlement, reconciled.id},
+      payload: %{external_reference: external_reference, mode: :external_reference}
+    )
+
+    Outbox.emit!("customer_credit_settlement.reconciled.v1",
+      aggregate: {:customer_credit_settlement, reconciled.id},
+      team_id: reconciled.team_id,
+      correlation_id: scope.correlation_id,
+      payload: %{
+        invoice_intent_id: reconciled.invoice_intent_id,
+        amount_minor: reconciled.amount_minor,
+        currency: reconciled.currency,
+        external_reference: external_reference
+      }
+    )
+
+    reconciled
   end
 
   @doc "Settlements of the scope's team, newest first (finance read roles)."

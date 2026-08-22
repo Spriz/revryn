@@ -143,21 +143,38 @@ defmodule BillingCore.Pricing.Tier do
     last? = index == count - 1
 
     List.flatten([
-      if(D.compare(tier.unit_rate, D.new(0)) == :lt,
-        do: [{:negative_unit_rate, index}],
-        else: []
-      ),
-      if(tier.flat_fee_minor < 0, do: [{:negative_flat_fee, index}], else: []),
-      if(index == 0 and not D.eq?(tier.from, D.new(0)),
-        do: [:tiers_must_start_at_zero],
-        else: []
-      ),
-      if(last? and not is_nil(tier.to), do: [:last_tier_must_be_unbounded], else: []),
-      if(not last? and is_nil(tier.to), do: [{:unbounded_tier_before_last, index}], else: []),
-      if(not is_nil(tier.to) and D.compare(tier.from, tier.to) != :lt,
-        do: [{:empty_tier, index}],
-        else: []
-      )
+      negative_unit_rate_errors(tier, index),
+      negative_flat_fee_errors(tier, index),
+      first_tier_start_errors(tier, index),
+      last_tier_bound_errors(tier, last?),
+      unbounded_before_last_errors(tier, index, last?),
+      empty_tier_errors(tier, index)
     ])
+  end
+
+  defp negative_unit_rate_errors(tier, index) do
+    if D.compare(tier.unit_rate, D.new(0)) == :lt, do: [{:negative_unit_rate, index}], else: []
+  end
+
+  defp negative_flat_fee_errors(tier, index) do
+    if tier.flat_fee_minor < 0, do: [{:negative_flat_fee, index}], else: []
+  end
+
+  defp first_tier_start_errors(tier, index) do
+    if index == 0 and not D.eq?(tier.from, D.new(0)), do: [:tiers_must_start_at_zero], else: []
+  end
+
+  defp last_tier_bound_errors(tier, last?) do
+    if last? and not is_nil(tier.to), do: [:last_tier_must_be_unbounded], else: []
+  end
+
+  defp unbounded_before_last_errors(tier, index, last?) do
+    if not last? and is_nil(tier.to), do: [{:unbounded_tier_before_last, index}], else: []
+  end
+
+  defp empty_tier_errors(tier, index) do
+    if not is_nil(tier.to) and D.compare(tier.from, tier.to) != :lt,
+      do: [{:empty_tier, index}],
+      else: []
   end
 end

@@ -107,19 +107,23 @@ defmodule BillingCore.Billing do
       if unresolved do
         {:error, :unresolved_intents}
       else
-        {:ok, run} =
-          Repo.transaction(fn ->
-            run
-            |> Ecto.Changeset.change(status: "closed", closed_at: DateTime.utc_now())
-            |> Repo.update!()
-            |> tap(fn r ->
-              Audit.record!(scope, "billing.run.closed", aggregate: {:billing_run, r.id})
-            end)
-          end)
-
-        {:ok, run}
+        persist_run_closed(scope, run)
       end
     end
+  end
+
+  defp persist_run_closed(scope, run) do
+    {:ok, run} =
+      Repo.transaction(fn ->
+        run
+        |> Ecto.Changeset.change(status: "closed", closed_at: DateTime.utc_now())
+        |> Repo.update!()
+        |> tap(fn r ->
+          Audit.record!(scope, "billing.run.closed", aggregate: {:billing_run, r.id})
+        end)
+      end)
+
+    {:ok, run}
   end
 
   @read_roles [:finance_operator, :billing_admin, :team_admin, :auditor]

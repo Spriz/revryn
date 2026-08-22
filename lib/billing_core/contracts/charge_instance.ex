@@ -86,38 +86,41 @@ defmodule BillingCore.Contracts.ChargeInstance do
 
   defp validate_recognition_period(changeset) do
     case get_field(changeset, :recognition_mode) do
-      :over_time ->
-        start_date = get_field(changeset, :service_start)
-        end_date = get_field(changeset, :service_end_exclusive)
+      :over_time -> validate_over_time_period(changeset)
+      :point_in_time -> validate_point_in_time_period(changeset)
+      _missing -> changeset
+    end
+  end
 
-        cond do
-          is_nil(start_date) or is_nil(end_date) ->
-            add_error(
-              changeset,
-              :service_start,
-              "over_time charges require a half-open service period"
-            )
+  defp validate_over_time_period(changeset) do
+    start_date = get_field(changeset, :service_start)
+    end_date = get_field(changeset, :service_end_exclusive)
 
-          not Date.before?(start_date, end_date) ->
-            add_error(changeset, :service_end_exclusive, "must be after service_start")
+    cond do
+      is_nil(start_date) or is_nil(end_date) ->
+        add_error(
+          changeset,
+          :service_start,
+          "over_time charges require a half-open service period"
+        )
 
-          true ->
-            changeset
-        end
+      not Date.before?(start_date, end_date) ->
+        add_error(changeset, :service_end_exclusive, "must be after service_start")
 
-      :point_in_time ->
-        if get_field(changeset, :service_start) || get_field(changeset, :service_end_exclusive) do
-          add_error(
-            changeset,
-            :service_start,
-            "point_in_time charges must not carry a service period"
-          )
-        else
-          changeset
-        end
-
-      _missing ->
+      true ->
         changeset
+    end
+  end
+
+  defp validate_point_in_time_period(changeset) do
+    if get_field(changeset, :service_start) || get_field(changeset, :service_end_exclusive) do
+      add_error(
+        changeset,
+        :service_start,
+        "point_in_time charges must not carry a service period"
+      )
+    else
+      changeset
     end
   end
 end

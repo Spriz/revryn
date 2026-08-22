@@ -61,19 +61,23 @@ defmodule BillingCore.Credits.Close.Calculation do
   @spec liability_effect(map()) :: {:ok, {atom(), integer()}} | {:error, term()}
   def liability_effect(%{transaction_type: type, amount_minor: amount} = transaction)
       when is_integer(amount) and amount > 0 do
-    case normalize_type(type) do
-      :grant -> {:ok, {:grant, amount}}
-      :reserve -> {:ok, {:reserve, 0}}
-      :release -> {:ok, {:release, 0}}
-      :apply -> {:ok, {:apply, -amount}}
-      :refund -> {:ok, {:refund, -amount}}
-      :expire -> {:ok, {:expire, -amount}}
-      :adjust -> adjustment_effect(amount, Map.get(transaction, :metadata, %{}))
-      _ -> {:error, :unknown_transaction_type}
-    end
+    typed_liability_effect(normalize_type(type), amount, transaction)
   end
 
   def liability_effect(_), do: {:error, :invalid_transaction}
+
+  defp typed_liability_effect(:grant, amount, _transaction), do: {:ok, {:grant, amount}}
+  defp typed_liability_effect(:reserve, _amount, _transaction), do: {:ok, {:reserve, 0}}
+  defp typed_liability_effect(:release, _amount, _transaction), do: {:ok, {:release, 0}}
+  defp typed_liability_effect(:apply, amount, _transaction), do: {:ok, {:apply, -amount}}
+  defp typed_liability_effect(:refund, amount, _transaction), do: {:ok, {:refund, -amount}}
+  defp typed_liability_effect(:expire, amount, _transaction), do: {:ok, {:expire, -amount}}
+
+  defp typed_liability_effect(:adjust, amount, transaction),
+    do: adjustment_effect(amount, Map.get(transaction, :metadata, %{}))
+
+  defp typed_liability_effect(_type, _amount, _transaction),
+    do: {:error, :unknown_transaction_type}
 
   defp normalize_transactions(transactions, input) do
     transactions

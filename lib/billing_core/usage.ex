@@ -117,44 +117,51 @@ defmodule BillingCore.Usage do
            }}
           | {:error, :unauthorized | :batch_too_large}
   def ingest_batch(%Scope{} = scope, events) when is_list(events) do
-    with :ok <- authorize(scope, @ingest_roles) do
-      if length(events) > max_batch_size() do
-        {:error, :batch_too_large}
-      else
-        team_id = Scope.team_id!(scope)
-
-        summary =
-          events
-          |> Enum.with_index()
-          |> Enum.reduce(
-            %{accepted: 0, duplicate: 0, rejected: [], quarantined: []},
-            fn {attrs, index}, acc ->
-              classify_batch_item(acc, index, attrs, safe_ingest(scope, team_id, attrs))
-            end
-          )
-          |> Map.update!(:rejected, &Enum.reverse/1)
-          |> Map.update!(:quarantined, &Enum.reverse/1)
-
-        if summary.accepted > 0 do
-          {:ok, _} =
-            Repo.transaction(fn ->
-              Outbox.emit!("usage_batch.accepted.v1",
-                aggregate: {"usage_batch", Ecto.UUID.generate()},
-                team_id: team_id,
-                correlation_id: scope.correlation_id,
-                payload: %{
-                  accepted: summary.accepted,
-                  duplicate: summary.duplicate,
-                  rejected: length(summary.rejected),
-                  quarantined: length(summary.quarantined)
-                }
-              )
-            end)
-        end
-
-        {:ok, summary}
-      end
+    with :ok <- authorize(scope, @ingest_roles),
+         :ok <- ensure_batch_size(events) do
+      team_id = Scope.team_id!(scope)
+      summary = summarize_batch(scope, team_id, events)
+      emit_batch_accepted!(scope, team_id, summary)
+      {:ok, summary}
     end
+  end
+
+  defp ensure_batch_size(events) do
+    if length(events) > max_batch_size(), do: {:error, :batch_too_large}, else: :ok
+  end
+
+  defp summarize_batch(scope, team_id, events) do
+    events
+    |> Enum.with_index()
+    |> Enum.reduce(
+      %{accepted: 0, duplicate: 0, rejected: [], quarantined: []},
+      fn {attrs, index}, acc ->
+        classify_batch_item(acc, index, attrs, safe_ingest(scope, team_id, attrs))
+      end
+    )
+    |> Map.update!(:rejected, &Enum.reverse/1)
+    |> Map.update!(:quarantined, &Enum.reverse/1)
+  end
+
+  defp emit_batch_accepted!(scope, team_id, summary) do
+    if summary.accepted > 0 do
+      {:ok, _} =
+        Repo.transaction(fn ->
+          Outbox.emit!("usage_batch.accepted.v1",
+            aggregate: {"usage_batch", Ecto.UUID.generate()},
+            team_id: team_id,
+            correlation_id: scope.correlation_id,
+            payload: %{
+              accepted: summary.accepted,
+              duplicate: summary.duplicate,
+              rejected: length(summary.rejected),
+              quarantined: length(summary.quarantined)
+            }
+          )
+        end)
+    end
+
+    :ok
   end
 
   ## Correction (BC-US-052)
@@ -197,44 +204,59 @@ defmodule BillingCore.Usage do
     with :ok <- authorize(scope, @ingest_roles),
          {:ok, void_external_id} <- require_void_event_id(opts) do
       team_id = Scope.team_id!(scope)
+      replacement = Map.get(opts, :replacement)
 
       Repo.transaction(fn ->
-        key = lock_event_key(team_id, external_event_id) || Repo.rollback(:not_found)
-
-        original =
-          Repo.one(
-            from e in Event,
-              where:
-                e.team_id == ^team_id and e.id == ^key.usage_event_id and
-                  e.occurred_at == ^key.occurred_at
-          ) || Repo.rollback(:not_found)
-
-        unless original.event_kind == :measurement, do: Repo.rollback(:not_a_measurement)
-
-        existing_void =
-          Repo.one(
-            from e in Event,
-              where:
-                e.team_id == ^team_id and e.event_kind == :void and
-                  e.voids_event_id == ^original.id and e.occurred_at == ^original.occurred_at
-          )
-
-        cond do
-          existing_void && existing_void.external_event_id == void_external_id ->
-            # Idempotent replay of the same correction.
-            :already_voided
-
-          existing_void ->
-            # At most one effective void per measurement (BC-US-052).
-            Repo.rollback(:already_voided)
-
-          original.status != :effective ->
-            Repo.rollback(:not_effective)
-
-          true ->
-            insert_void(scope, team_id, original, void_external_id, Map.get(opts, :replacement))
-        end
+        void_event_in_txn(scope, team_id, external_event_id, void_external_id, replacement)
       end)
+    end
+  end
+
+  defp void_event_in_txn(scope, team_id, external_event_id, void_external_id, replacement) do
+    key = lock_event_key(team_id, external_event_id) || Repo.rollback(:not_found)
+    original = fetch_original_measurement!(team_id, key)
+    existing_void = find_existing_void(team_id, original)
+    apply_void_decision(scope, team_id, original, existing_void, void_external_id, replacement)
+  end
+
+  defp fetch_original_measurement!(team_id, key) do
+    original =
+      Repo.one(
+        from e in Event,
+          where:
+            e.team_id == ^team_id and e.id == ^key.usage_event_id and
+              e.occurred_at == ^key.occurred_at
+      ) || Repo.rollback(:not_found)
+
+    unless original.event_kind == :measurement, do: Repo.rollback(:not_a_measurement)
+
+    original
+  end
+
+  defp find_existing_void(team_id, original) do
+    Repo.one(
+      from e in Event,
+        where:
+          e.team_id == ^team_id and e.event_kind == :void and
+            e.voids_event_id == ^original.id and e.occurred_at == ^original.occurred_at
+    )
+  end
+
+  defp apply_void_decision(scope, team_id, original, existing_void, void_external_id, replacement) do
+    cond do
+      existing_void && existing_void.external_event_id == void_external_id ->
+        # Idempotent replay of the same correction.
+        :already_voided
+
+      existing_void ->
+        # At most one effective void per measurement (BC-US-052).
+        Repo.rollback(:already_voided)
+
+      original.status != :effective ->
+        Repo.rollback(:not_effective)
+
+      true ->
+        insert_void(scope, team_id, original, void_external_id, replacement)
     end
   end
 

@@ -60,22 +60,7 @@ defmodule BillingCore.Idempotency do
   defp execute(team_id, command_family, key, principal_id, request_hash, fun) do
     result =
       Repo.transaction(fn ->
-        case fun.() do
-          {:ok, %{} = response_body} ->
-            insert_record!(
-              team_id,
-              command_family,
-              key,
-              principal_id,
-              request_hash,
-              response_body
-            )
-
-            response_body
-
-          {:error, reason} ->
-            Repo.rollback(reason)
-        end
+        run_and_record_in_txn(team_id, command_family, key, principal_id, request_hash, fun)
       end)
 
     case result do
@@ -84,16 +69,50 @@ defmodule BillingCore.Idempotency do
     end
   rescue
     error in [Postgrex.Error, Ecto.ConstraintError] ->
-      if unique_violation?(error) do
-        # Concurrent duplicate: the winner's record is committed; treat as replay.
-        case fetch(team_id, command_family, key) do
-          %{request_hash: ^request_hash} = record -> {:replayed, record.response_body || %{}}
-          %{} -> {:error, :idempotency_key_reused}
-          nil -> reraise(error, __STACKTRACE__)
-        end
-      else
-        reraise(error, __STACKTRACE__)
-      end
+      handle_execute_error(error, __STACKTRACE__, team_id, command_family, key, request_hash)
+  end
+
+  defp run_and_record_in_txn(team_id, command_family, key, principal_id, request_hash, fun) do
+    case fun.() do
+      {:ok, %{} = response_body} ->
+        insert_record!(
+          team_id,
+          command_family,
+          key,
+          principal_id,
+          request_hash,
+          response_body
+        )
+
+        response_body
+
+      {:error, reason} ->
+        Repo.rollback(reason)
+    end
+  end
+
+  defp handle_execute_error(error, stacktrace, team_id, command_family, key, request_hash) do
+    if unique_violation?(error) do
+      # Concurrent duplicate: the winner's record is committed; treat as replay.
+      replay_after_unique_violation(error, stacktrace, team_id, command_family, key, request_hash)
+    else
+      reraise(error, stacktrace)
+    end
+  end
+
+  defp replay_after_unique_violation(
+         error,
+         stacktrace,
+         team_id,
+         command_family,
+         key,
+         request_hash
+       ) do
+    case fetch(team_id, command_family, key) do
+      %{request_hash: ^request_hash} = record -> {:replayed, record.response_body || %{}}
+      %{} -> {:error, :idempotency_key_reused}
+      nil -> reraise(error, stacktrace)
+    end
   end
 
   defp fetch(team_id, command_family, key) do

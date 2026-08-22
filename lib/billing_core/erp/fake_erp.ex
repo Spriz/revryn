@@ -1100,14 +1100,45 @@ defmodule BillingCore.ERP.FakeERP do
   defp validate_durable_snapshot(_payload), do: {:error, :invalid_payload}
 
   defp valid_durable_values?(payload) do
-    is_map(payload.capabilities) and is_list(payload.preflight_checks) and is_map(payload.drafts) and
-      is_map(payload.booked) and is_map(payload.by_reference) and
-      is_integer(payload.next_draft_id) and payload.next_draft_id > 0 and
-      is_integer(payload.next_booked_number) and payload.next_booked_number > 0 and
-      is_map(payload.vouchers) and is_map(payload.voucher_by_reference) and
-      is_map(payload.voucher_attachments) and is_integer(payload.next_voucher_number) and
-      payload.next_voucher_number > 0
+    Enum.all?([
+      valid_capabilities?(payload),
+      valid_preflight_checks?(payload),
+      valid_drafts?(payload),
+      valid_booked?(payload),
+      valid_by_reference?(payload),
+      valid_next_draft_id?(payload),
+      valid_next_booked_number?(payload),
+      valid_vouchers?(payload),
+      valid_voucher_by_reference?(payload),
+      valid_voucher_attachments?(payload),
+      valid_next_voucher_number?(payload)
+    ])
   end
+
+  defp valid_capabilities?(payload), do: is_map(payload.capabilities)
+
+  defp valid_preflight_checks?(payload), do: is_list(payload.preflight_checks)
+
+  defp valid_drafts?(payload), do: is_map(payload.drafts)
+
+  defp valid_booked?(payload), do: is_map(payload.booked)
+
+  defp valid_by_reference?(payload), do: is_map(payload.by_reference)
+
+  defp valid_next_draft_id?(payload),
+    do: is_integer(payload.next_draft_id) and payload.next_draft_id > 0
+
+  defp valid_next_booked_number?(payload),
+    do: is_integer(payload.next_booked_number) and payload.next_booked_number > 0
+
+  defp valid_vouchers?(payload), do: is_map(payload.vouchers)
+
+  defp valid_voucher_by_reference?(payload), do: is_map(payload.voucher_by_reference)
+
+  defp valid_voucher_attachments?(payload), do: is_map(payload.voucher_attachments)
+
+  defp valid_next_voucher_number?(payload),
+    do: is_integer(payload.next_voucher_number) and payload.next_voucher_number > 0
 
   defp snapshot_sha256(payload), do: :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
 

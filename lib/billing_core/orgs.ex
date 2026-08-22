@@ -81,29 +81,28 @@ defmodule BillingCore.Orgs do
   # Dialyzer false positive: the literal Multi.new() loses MapSet's
   # opaqueness when inlined into the Multi.insert call.
   @dialyzer {:no_opaque, create_organization: 2}
+  @dialyzer {:no_opaque, create_organization_multi: 2}
   def create_organization(attrs, %User{} = creator) do
     attrs = Map.new(attrs)
-    name = attrs[:name]
-    team_name = attrs[:team_name] || @default_team_name
 
-    org_changeset =
-      Organization.changeset(%Organization{}, %{
-        name: name,
-        slug: attrs[:slug] || slugify(name),
-        security_policy: attrs[:security_policy] || %{}
-      })
+    attrs
+    |> create_organization_multi(creator)
+    |> Repo.transaction()
+    |> case do
+      {:ok, changes} ->
+        {:ok,
+         Map.take(changes, [:organization, :team, :organization_membership, :team_membership])}
 
+      {:error, _step, changeset, _changes} ->
+        {:error, changeset}
+    end
+  end
+
+  defp create_organization_multi(attrs, creator) do
     Multi.new()
-    |> Multi.insert(:organization, org_changeset)
+    |> Multi.insert(:organization, new_organization_changeset(attrs))
     |> Multi.insert(:team, fn %{organization: org} ->
-      Team.changeset(%Team{organization_id: org.id}, %{
-        name: team_name,
-        slug: attrs[:team_slug] || slugify(team_name),
-        legal_name: attrs[:legal_name] || org.name,
-        base_currency: attrs[:base_currency] || @default_base_currency,
-        time_zone: attrs[:time_zone] || @default_time_zone,
-        locale: attrs[:locale] || @default_locale
-      })
+      first_team_changeset(attrs, org)
     end)
     |> Multi.insert(:settings_version, fn %{team: team} ->
       initial_settings_version(team, creator.id)
@@ -121,62 +120,80 @@ defmodule BillingCore.Orgs do
       )
     end)
     |> Multi.run(:audit, fn _repo, changes ->
-      %{
-        organization: org,
-        team: team,
-        organization_membership: om,
-        team_membership: tm
-      } = changes
-
-      scope = %Scope{
-        principal_type: :user,
-        user: creator,
-        organization: org,
-        team: team,
-        organization_roles: om.roles,
-        team_roles: tm.roles,
-        platform_admin?: creator.platform_admin
-      }
-
-      Audit.record!(scope, "orgs.organization.created",
-        aggregate: {"organization", org.id},
-        organization_id: org.id,
-        team_id: nil,
-        payload: %{slug: org.slug}
-      )
-
-      Audit.record!(scope, "orgs.team.created",
-        aggregate: {"team", team.id},
-        organization_id: org.id,
-        team_id: team.id,
-        payload: %{slug: team.slug}
-      )
-
-      Audit.record!(scope, "orgs.organization_membership.created",
-        aggregate: {"organization_membership", om.id},
-        organization_id: org.id,
-        team_id: nil,
-        payload: %{user_id: creator.id, roles: om.roles}
-      )
-
-      Audit.record!(scope, "orgs.team_membership.created",
-        aggregate: {"team_membership", tm.id},
-        organization_id: org.id,
-        team_id: team.id,
-        payload: %{user_id: creator.id, roles: tm.roles}
-      )
-
-      {:ok, :recorded}
+      record_creation_audit(changes, creator)
     end)
-    |> Repo.transaction()
-    |> case do
-      {:ok, changes} ->
-        {:ok,
-         Map.take(changes, [:organization, :team, :organization_membership, :team_membership])}
+  end
 
-      {:error, _step, changeset, _changes} ->
-        {:error, changeset}
-    end
+  defp new_organization_changeset(attrs) do
+    name = attrs[:name]
+
+    Organization.changeset(%Organization{}, %{
+      name: name,
+      slug: attrs[:slug] || slugify(name),
+      security_policy: attrs[:security_policy] || %{}
+    })
+  end
+
+  defp first_team_changeset(attrs, org) do
+    team_name = attrs[:team_name] || @default_team_name
+
+    Team.changeset(%Team{organization_id: org.id}, %{
+      name: team_name,
+      slug: attrs[:team_slug] || slugify(team_name),
+      legal_name: attrs[:legal_name] || org.name,
+      base_currency: attrs[:base_currency] || @default_base_currency,
+      time_zone: attrs[:time_zone] || @default_time_zone,
+      locale: attrs[:locale] || @default_locale
+    })
+  end
+
+  defp record_creation_audit(changes, creator) do
+    %{
+      organization: org,
+      team: team,
+      organization_membership: om,
+      team_membership: tm
+    } = changes
+
+    scope = %Scope{
+      principal_type: :user,
+      user: creator,
+      organization: org,
+      team: team,
+      organization_roles: om.roles,
+      team_roles: tm.roles,
+      platform_admin?: creator.platform_admin
+    }
+
+    Audit.record!(scope, "orgs.organization.created",
+      aggregate: {"organization", org.id},
+      organization_id: org.id,
+      team_id: nil,
+      payload: %{slug: org.slug}
+    )
+
+    Audit.record!(scope, "orgs.team.created",
+      aggregate: {"team", team.id},
+      organization_id: org.id,
+      team_id: team.id,
+      payload: %{slug: team.slug}
+    )
+
+    Audit.record!(scope, "orgs.organization_membership.created",
+      aggregate: {"organization_membership", om.id},
+      organization_id: org.id,
+      team_id: nil,
+      payload: %{user_id: creator.id, roles: om.roles}
+    )
+
+    Audit.record!(scope, "orgs.team_membership.created",
+      aggregate: {"team_membership", tm.id},
+      organization_id: org.id,
+      team_id: team.id,
+      payload: %{user_id: creator.id, roles: tm.roles}
+    )
+
+    {:ok, :recorded}
   end
 
   @doc "Fetches an organization by ID, raising if absent."

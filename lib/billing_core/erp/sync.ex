@@ -220,18 +220,7 @@ defmodule BillingCore.ERP.Sync do
           |> Ecto.Changeset.change(state: "queued", next_attempt_at: nil)
           |> Repo.update!()
 
-          # §11.2 models the operator recovery edge explicitly
-          # (sync_error → retry_sync → sync_pending) so a retried draft
-          # creation can reconcile legally; other intent states tolerate
-          # the no-op (INV-015).
-          if operation.type == "erp.create_draft" and operation.target_type == "invoice_intent" do
-            intent = Repo.get!(InvoiceIntent, operation.target_id)
-
-            case Billing.transition_intent(scope, intent, :retry_sync, reason: "manual_retry") do
-              {:ok, _lifecycle} -> :ok
-              {:error, {:illegal_state, _}} -> :ok
-            end
-          end
+          resume_intent_sync(scope, operation, "manual_retry")
 
           Audit.record!(scope, "erp.operation.manual_retry",
             aggregate: {:operation, operation.id}
@@ -273,14 +262,7 @@ defmodule BillingCore.ERP.Sync do
           |> Ecto.Changeset.change(state: "queued", next_attempt_at: nil)
           |> Repo.update!()
 
-          if operation.type == "erp.create_draft" and operation.target_type == "invoice_intent" do
-            intent = Repo.get!(InvoiceIntent, operation.target_id)
-
-            case Billing.transition_intent(scope, intent, :retry_sync, reason: "remediated") do
-              {:ok, _lifecycle} -> :ok
-              {:error, {:illegal_state, _}} -> :ok
-            end
-          end
+          resume_intent_sync(scope, operation, "remediated")
 
           Audit.record!(scope, "erp.operation.remediated",
             aggregate: {:operation, operation.id},
@@ -297,6 +279,25 @@ defmodule BillingCore.ERP.Sync do
       {:ok, requeued}
     end
   end
+
+  # §11.2 models the operator recovery edge explicitly
+  # (sync_error → retry_sync → sync_pending) so a retried draft
+  # creation can reconcile legally; other intent states tolerate
+  # the no-op (INV-015).
+  defp resume_intent_sync(
+         scope,
+         %{type: "erp.create_draft", target_type: "invoice_intent"} = operation,
+         reason
+       ) do
+    intent = Repo.get!(InvoiceIntent, operation.target_id)
+
+    case Billing.transition_intent(scope, intent, :retry_sync, reason: reason) do
+      {:ok, _lifecycle} -> :ok
+      {:error, {:illegal_state, _}} -> :ok
+    end
+  end
+
+  defp resume_intent_sync(_scope, _operation, _reason), do: :ok
 
   defp authorize_remediation(scope, %{error_class: "authorization"}),
     do: authorize(scope, [:team_admin])

@@ -106,24 +106,48 @@ defmodule BillingCore.Pricing.Engine do
   ## Request validation
 
   defp validate_request(%RatingRequest{} = request) do
+    with :ok <- validate_currency(request),
+         :ok <- validate_quantity(request),
+         :ok <- validate_full_period(request) do
+      validate_active_period(request)
+    end
+  end
+
+  defp validate_currency(request) do
+    if Money.valid_currency?(request.currency) do
+      :ok
+    else
+      {:error, {:invalid_currency, request.currency}}
+    end
+  end
+
+  defp validate_quantity(request) do
+    if is_struct(request.quantity, D) do
+      :ok
+    else
+      {:error, {:invalid_quantity, request.quantity}}
+    end
+  end
+
+  defp validate_full_period(request) do
+    if is_nil(request.full_period) or is_struct(request.full_period, Period) do
+      :ok
+    else
+      {:error, :invalid_full_period}
+    end
+  end
+
+  defp validate_active_period(%RatingRequest{active_period: nil}), do: :ok
+
+  defp validate_active_period(request) do
     cond do
-      not Money.valid_currency?(request.currency) ->
-        {:error, {:invalid_currency, request.currency}}
-
-      not is_struct(request.quantity, D) ->
-        {:error, {:invalid_quantity, request.quantity}}
-
-      not (is_nil(request.full_period) or is_struct(request.full_period, Period)) ->
-        {:error, :invalid_full_period}
-
-      not (is_nil(request.active_period) or is_struct(request.active_period, Period)) ->
+      not is_struct(request.active_period, Period) ->
         {:error, :invalid_active_period}
 
-      not is_nil(request.active_period) and is_nil(request.full_period) ->
+      is_nil(request.full_period) ->
         {:error, :active_period_without_full_period}
 
-      not is_nil(request.active_period) and
-          not Period.covers?(request.full_period, request.active_period) ->
+      not Period.covers?(request.full_period, request.active_period) ->
         {:error, :active_period_not_covered}
 
       true ->
